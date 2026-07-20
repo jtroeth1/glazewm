@@ -86,11 +86,6 @@ impl ColumnGrid {
       .map(CommonGetters::id)
   }
 
-  /// Current width fraction of the center column, if present.
-  pub fn center_width(&self) -> Option<f32> {
-    self.widths.get(self.center_index()).copied()
-  }
-
   /// `(column, row)` position of the window with `id`, if present.
   pub fn find(&self, id: Uuid) -> Option<(usize, usize)> {
     self.columns.iter().enumerate().find_map(|(col, windows)| {

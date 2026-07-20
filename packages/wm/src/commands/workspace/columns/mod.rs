@@ -100,7 +100,7 @@ pub fn apply_columns(
     .unwrap_or(windows.len() / 2);
 
   let center_window = windows[center_index].clone();
-
+  workspace.set_center_window_id(Some(center_window.id()));
 
   // A different window is taking the center, so the one it phases out
   // becomes the `center` toggle's swap-back target.
@@ -240,12 +240,15 @@ pub fn reapply_columns_after_move(
   Ok(())
 }
 
-/// Id of the window currently in the workspace's center — the top of its
-/// widest column — if the workspace has any tiling windows. Capture this
-/// before unmanaging a closing window so a follow-up
+/// Id of the window currently in the workspace's `C` column, if stored.
+/// Falls back to width-based inference when no explicit center is set
+/// (e.g. first layout before `apply_columns` runs). Capture this before
+/// unmanaging a closing window so a follow-up
 /// `reapply_assigned_columns` can keep that window centered.
 pub fn workspace_center_window_id(workspace: &Workspace) -> Option<Uuid> {
-  ColumnGrid::read(workspace).center_window_id()
+  workspace
+    .center_window_id()
+    .or_else(|| ColumnGrid::read(workspace).center_window_id())
 }
 
 /// Id of the nearest neighbor of `window_id` in the column grid.
@@ -308,8 +311,9 @@ fn remember_outgoing_center(
   }
 }
 
-/// Current width fraction of the workspace's center column — its widest
-/// column — when it has a laid-out columns of at least two tiling windows.
+/// Current width fraction of the workspace's center column when it has
+/// at least two tiling windows. Uses the stored center window ID to
+/// locate the right column instead of width-based inference.
 ///
 /// Returns `None` for a workspace with fewer than two tiling windows,
 /// where no meaningful center width exists.
@@ -320,7 +324,10 @@ fn workspace_center_width(workspace: &Workspace) -> Option<f32> {
     return None;
   }
 
-  grid.center_width()
+  // Use stored center to find the right column index.
+  let center_id = workspace.center_window_id()?;
+  let (col, _) = grid.find(center_id)?;
+  grid.widths.get(col).copied()
 }
 
 /// Records the workspace's current center-column width into its assigned

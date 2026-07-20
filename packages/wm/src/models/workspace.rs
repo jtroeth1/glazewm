@@ -32,6 +32,9 @@ struct WorkspaceInner {
   config: WorkspaceConfig,
   gaps_config: GapsConfig,
   tiling_direction: TilingDirection,
+  /// Id of the window currently occupying the `C` column, set by
+  /// `apply_columns` and read by `workspace_center_window_id`.
+  center_window_id: Option<Uuid>,
 }
 
 impl Workspace {
@@ -48,6 +51,7 @@ impl Workspace {
       config,
       gaps_config,
       tiling_direction,
+      center_window_id: None,
     };
 
     Self(Rc::new(RefCell::new(workspace)))
@@ -61,6 +65,16 @@ impl Workspace {
   /// Update the underlying config for the workspace.
   pub fn set_config(&self, config: WorkspaceConfig) {
     self.0.borrow_mut().config = config;
+  }
+
+  /// Id of the window currently in the `C` column.
+  pub fn center_window_id(&self) -> Option<Uuid> {
+    self.0.borrow().center_window_id
+  }
+
+  /// Store which window occupies the `C` column.
+  pub fn set_center_window_id(&self, id: Option<Uuid>) {
+    self.0.borrow_mut().center_window_id = id;
   }
 
   /// Whether the workspace is currently displayed by the parent monitor.
