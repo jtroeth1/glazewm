@@ -4,6 +4,7 @@ use wm_platform::WindowId;
 
 use crate::{
   commands::{
+    container::set_focused_descendant,
     window::unmanage_window,
     workspace::{
       deactivate_workspace, reapply_assigned_columns,
@@ -44,8 +45,18 @@ pub fn handle_window_destroyed(
     {
       deactivate_workspace(workspace, state)?;
     } else {
+      // Capture the focus target chosen by unmanage_window before the
+      // reapply shifts focus back to the center window.
+      let focus_target = state.focused_container();
+
       // Re-tidy the workspace's columns (if any) now a window's gone.
       reapply_assigned_columns(&workspace, center, state, config)?;
+
+      // Re-assert focus since render shifts it to center.
+      if let Some(target) = focus_target {
+        set_focused_descendant(&target, None);
+        state.pending_sync.queue_focus_change();
+      }
     }
   }
 

@@ -4,6 +4,7 @@ use wm_platform::NativeWindow;
 
 use crate::{
   commands::{
+    container::set_focused_descendant,
     window::unmanage_window,
     workspace::{reapply_assigned_columns, workspace_center_window_id},
   },
@@ -48,7 +49,14 @@ pub fn handle_window_hidden(
 
       // Re-tidy the workspace's columns (if any) now a window's gone.
       if let Some(workspace) = workspace {
+        let focus_target = state.focused_container();
         reapply_assigned_columns(&workspace, center, state, config)?;
+
+        // Re-assert focus since render shifts it to center.
+        if let Some(target) = focus_target {
+          set_focused_descendant(&target, None);
+          state.pending_sync.queue_focus_change();
+        }
       }
     }
   }
