@@ -83,6 +83,10 @@ pub fn apply_columns(
     ws
   };
 
+  if windows.len() < 2 {
+    return Ok(());
+  }
+
   // Center = the preferred center window if it's still present, else the
   // focused tiling window, else the middle one by position.
   let focused_id = focused_window_id(workspace);
