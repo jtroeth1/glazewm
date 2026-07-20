@@ -252,8 +252,7 @@ pub fn workspace_center_window_id(workspace: &Workspace) -> Option<Uuid> {
 ///
 /// First looks for an adjacent row in the same column. If the window is
 /// alone in its column, picks the top window of the nearest non-empty
-/// adjacent column (preferring the column to the right, then left),
-/// skipping the center column so focus stays on the side.
+/// column (preferring the column to the right on tie).
 pub fn column_neighbor_of(
   workspace: &Workspace,
   window_id: Uuid,
@@ -272,12 +271,10 @@ pub fn column_neighbor_of(
     return Some(column[neighbor_row].id());
   }
 
-  // Alone in column — find the nearest non-center adjacent column.
-  let center_col = grid.center_index();
+  // Alone in column — find the nearest non-empty adjacent column.
   let candidates = (0..grid.columns.len())
-    .filter(|&c| c != col && c != center_col && !grid.columns[c].is_empty());
+    .filter(|&c| c != col && !grid.columns[c].is_empty());
 
-  // Pick the closest column by distance, preferring right on tie.
   candidates
     .min_by_key(|&c| {
       let dist = (c as isize - col as isize).unsigned_abs();
