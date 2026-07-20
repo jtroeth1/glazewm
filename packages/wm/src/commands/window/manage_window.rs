@@ -7,7 +7,7 @@ use crate::{
   commands::{
     container::{attach_container, set_focused_descendant},
     window::run_window_rules,
-    workspace::reapply_assigned_columns,
+    workspace::{reapply_assigned_columns, workspace_center_window_id},
   },
   models::{
     Container, Monitor, NativeWindowProperties, NonTilingWindow,
@@ -83,10 +83,12 @@ pub fn manage_window(
     });
 
     // Reapply the workspace's columns (if any) so the new tiling window
-    // slots into the layout. This also covers startup, since every
-    // existing window is managed through here.
+    // slots into a side column. Pass the current center so the existing
+    // center stays put — the new window lands in the side stack, not the
+    // center.
     if is_tiling {
-      reapply_assigned_columns(&workspace, None, state, config)?;
+      let current_center = workspace_center_window_id(&workspace);
+      reapply_assigned_columns(&workspace, current_center, state, config)?;
     }
   }
 

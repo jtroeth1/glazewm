@@ -53,6 +53,7 @@ general:
     # Standard widescreen (~16:9): center with a single side stack.
     - min_aspect_ratio: 1.5
       spec: 'C,*'
+      center: 0.5
     # Anything narrower: normal tiling.
     - spec: default
 
