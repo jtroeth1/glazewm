@@ -74,21 +74,25 @@ pub fn manage_window(
 
     let is_tiling = window.state() == WindowState::Tiling;
     let workspace = window.workspace().context("No workspace.")?;
+    let window_container: Container = window.into();
 
     // Sibling containers need to be redrawn if the window is tiling.
     state.pending_sync.queue_container_to_redraw(if is_tiling {
-      window.parent().context("No parent.")?
+      window_container.parent().context("No parent.")?
     } else {
-      window.into()
+      window_container.clone()
     });
 
     // Reapply the workspace's columns (if any) so the new tiling window
     // slots into a side column. Pass the current center so the existing
     // center stays put — the new window lands in the side stack, not the
-    // center.
+    // center. Re-assert focus on the new window afterwards, since the
+    // tree rebuild can shift the focus chain back to the center.
     if is_tiling {
       let current_center = workspace_center_window_id(&workspace);
       reapply_assigned_columns(&workspace, current_center, state, config)?;
+      set_focused_descendant(&window_container, None);
+      state.pending_sync.queue_focus_change();
     }
   }
 
