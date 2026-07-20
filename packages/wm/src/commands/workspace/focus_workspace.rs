@@ -1,7 +1,10 @@
 use anyhow::Context;
 use tracing::info;
 
-use super::{activate_workspace, reapply_assigned_columns};
+use super::{
+  activate_workspace, reapply_assigned_columns,
+  workspace_center_window_id,
+};
 use crate::{
   commands::{
     container::set_focused_descendant, workspace::deactivate_workspace,
@@ -65,9 +68,10 @@ pub fn focus_workspace(
     set_focused_descendant(&container_to_focus, None);
     state.pending_sync.queue_focus_change();
 
-    // Reapply this workspace's columns (if any), now that its last-focused
-    // window is focused and will become the center.
-    reapply_assigned_columns(&target_workspace, None, state, config)?;
+    // Reapply this workspace's columns (if any). Use the stored center
+    // so the layout is preserved across monitor switches.
+    let center = workspace_center_window_id(&target_workspace);
+    reapply_assigned_columns(&target_workspace, center, state, config)?;
 
     // Display the workspace to switch focus to.
     state
