@@ -85,11 +85,27 @@ impl UserConfig {
     let config_str = fs::read_to_string(config_path)
       .context("Unable to read config file.")?;
 
-    // TODO: Improve error formatting of serde_yaml errors. Something
-    // similar to https://github.com/AlexanderThaller/format_serde_error
-    let config_value = serde_yaml::from_str(&config_str)?;
-
-    Ok((config_value, config_str))
+    // If the config fails to parse, back up the broken file so a
+    // subsequent launch that creates a fresh sample doesn't silently
+    // discard the user's config.
+    match serde_yaml::from_str::<ParsedConfig>(&config_str) {
+      Ok(config_value) => Ok((config_value, config_str)),
+      Err(err) => {
+        let backup = config_path.with_extension("yaml.bak");
+        if let Err(backup_err) = fs::copy(config_path, &backup) {
+          tracing::warn!(
+            "Failed to back up config to {}: {backup_err}",
+            backup.display()
+          );
+        } else {
+          tracing::info!(
+            "Backed up unparseable config to {}.",
+            backup.display()
+          );
+        }
+        Err(err.into())
+      }
+    }
   }
 
   /// Initializes a new config file from the sample config resource.

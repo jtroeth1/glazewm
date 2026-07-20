@@ -86,13 +86,18 @@ pub fn manage_window(
     // Reapply the workspace's columns (if any) so the new tiling window
     // slots into a side column. Pass the current center so the existing
     // center stays put — the new window lands in the side stack, not the
-    // center. Re-assert focus on the new window afterwards, since the
-    // tree rebuild can shift the focus chain back to the center.
+    // center. Re-assert focus and jump cursor to the new window
+    // afterwards: the tree rebuild shifts the focus chain back to the
+    // center, and without a cursor jump `focus_follows_cursor` would
+    // immediately refocus the center (cursor is still over it).
     if is_tiling {
       let current_center = workspace_center_window_id(&workspace);
       reapply_assigned_columns(&workspace, current_center, state, config)?;
       set_focused_descendant(&window_container, None);
-      state.pending_sync.queue_focus_change();
+      state
+        .pending_sync
+        .queue_focus_change()
+        .queue_cursor_jump();
     }
   }
 
