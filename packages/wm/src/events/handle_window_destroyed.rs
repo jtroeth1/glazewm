@@ -1,5 +1,5 @@
 use anyhow::Context;
-use tracing::{debug, info};
+use tracing::info;
 use wm_platform::WindowId;
 
 use crate::{
@@ -39,15 +39,8 @@ pub fn handle_window_destroyed(
     // recently focused window (which is often the center).
     let neighbor_id =
       if effective_columns(&workspace, config)?.is_some() {
-        let nid = column_neighbor_of(&workspace, window.id());
-        debug!(
-          "destroyed: columns active, neighbor_id={:?} for window={}",
-          nid,
-          window.id()
-        );
-        nid
+        column_neighbor_of(&workspace, window.id())
       } else {
-        debug!("destroyed: no columns active");
         None
       };
 
@@ -70,19 +63,9 @@ pub fn handle_window_destroyed(
       let focus_target = neighbor_id
         .and_then(|id| state.container_by_id(id))
         .or_else(|| state.focused_container());
-      debug!(
-        "destroyed: after reapply, focus_target={:?}, focused_container={:?}",
-        focus_target.as_ref().map(CommonGetters::id),
-        state.focused_container().map(|c| c.id())
-      );
       if let Some(target) = focus_target {
         set_focused_descendant(&target, None);
         state.pending_sync.queue_focus_change();
-        debug!(
-          "destroyed: set focus to {:?}, focused_container now={:?}",
-          target.id(),
-          state.focused_container().map(|c| c.id())
-        );
       }
     }
   }

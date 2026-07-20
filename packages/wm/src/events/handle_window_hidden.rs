@@ -1,4 +1,4 @@
-use tracing::{debug, info};
+use tracing::info;
 use wm_common::{DisplayState, HideMethod};
 use wm_platform::NativeWindow;
 
@@ -50,20 +50,12 @@ pub fn handle_window_hidden(
       // When columns are active, find the adjacent window in the same
       // column so focus goes to a spatial neighbor.
       let neighbor_id = workspace.as_ref().and_then(|ws| {
-        let has_cols = effective_columns(ws, config)
+        effective_columns(ws, config)
           .ok()
           .flatten()
-          .is_some();
-        let nid = if has_cols {
-          column_neighbor_of(ws, window.id())
-        } else {
-          None
-        };
-        debug!(
-          "hidden: columns={has_cols}, neighbor_id={nid:?} for window={}",
-          window.id()
-        );
-        nid
+          .is_some()
+          .then(|| column_neighbor_of(ws, window.id()))
+          .flatten()
       });
 
       unmanage_window(window, state)?;
@@ -75,19 +67,9 @@ pub fn handle_window_hidden(
         let focus_target = neighbor_id
           .and_then(|id| state.container_by_id(id))
           .or_else(|| state.focused_container());
-        debug!(
-          "hidden: after reapply, focus_target={:?}, focused_container={:?}",
-          focus_target.as_ref().map(CommonGetters::id),
-          state.focused_container().map(|c| c.id())
-        );
         if let Some(target) = focus_target {
           set_focused_descendant(&target, None);
           state.pending_sync.queue_focus_change();
-          debug!(
-            "hidden: set focus to {:?}, focused_container now={:?}",
-            target.id(),
-            state.focused_container().map(|c| c.id())
-          );
         }
       }
     }
