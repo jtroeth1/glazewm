@@ -7,8 +7,8 @@ use crate::{
     container::set_focused_descendant,
     window::unmanage_window,
     workspace::{
-      deactivate_workspace, reapply_assigned_columns,
-      workspace_center_window_id,
+      column_neighbor_of, deactivate_workspace, effective_columns,
+      reapply_assigned_columns, workspace_center_window_id,
     },
   },
   traits::{CommonGetters, WindowGetters},
@@ -30,9 +30,19 @@ pub fn handle_window_destroyed(
   if let Some(window) = found_window {
     let workspace = window.workspace().context("No workspace.")?;
 
-    // Note the current center before unmanaging so the reapply keeps it in
-    // place — closing a side window shouldn't move the center window.
+    // Note the current center before unmanaging so the reapply keeps it
+    // in place — closing a side window shouldn't move the center window.
     let center = workspace_center_window_id(&workspace);
+
+    // When columns are active, find the adjacent window in the same
+    // column so focus goes to a spatial neighbor rather than the most
+    // recently focused window (which is often the center).
+    let neighbor_id =
+      if effective_columns(&workspace, config)?.is_some() {
+        column_neighbor_of(&workspace, window.id())
+      } else {
+        None
+      };
 
     info!("Window closed: {window}");
     unmanage_window(window, state)?;
@@ -45,14 +55,14 @@ pub fn handle_window_destroyed(
     {
       deactivate_workspace(workspace, state)?;
     } else {
-      // Capture the focus target chosen by unmanage_window before the
-      // reapply shifts focus back to the center window.
-      let focus_target = state.focused_container();
-
       // Re-tidy the workspace's columns (if any) now a window's gone.
       reapply_assigned_columns(&workspace, center, state, config)?;
 
-      // Re-assert focus since render shifts it to center.
+      // Focus the column neighbor (spatial adjacency) if available,
+      // otherwise keep whatever unmanage_window chose.
+      let focus_target = neighbor_id
+        .and_then(|id| state.container_by_id(id))
+        .or_else(|| state.focused_container());
       if let Some(target) = focus_target {
         set_focused_descendant(&target, None);
         state.pending_sync.queue_focus_change();

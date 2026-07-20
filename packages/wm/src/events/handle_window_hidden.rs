@@ -6,7 +6,10 @@ use crate::{
   commands::{
     container::set_focused_descendant,
     window::unmanage_window,
-    workspace::{reapply_assigned_columns, workspace_center_window_id},
+    workspace::{
+      column_neighbor_of, effective_columns, reapply_assigned_columns,
+      workspace_center_window_id,
+    },
   },
   traits::{CommonGetters, WindowGetters},
   user_config::UserConfig,
@@ -40,19 +43,28 @@ pub fn handle_window_hidden(
     {
       let workspace = window.workspace();
 
-      // Note the current center before unmanaging so the reapply keeps it
-      // in place — closing a side window shouldn't move the center
-      // window.
+      // Note the current center before unmanaging so the reapply keeps
+      // it in place — closing a side window shouldn't move the center.
       let center = workspace.as_ref().and_then(workspace_center_window_id);
+
+      // When columns are active, find the adjacent window in the same
+      // column so focus goes to a spatial neighbor.
+      let neighbor_id = workspace.as_ref().and_then(|ws| {
+        effective_columns(ws, config)
+          .ok()
+          .flatten()
+          .and_then(|_| column_neighbor_of(ws, window.id()))
+      });
 
       unmanage_window(window, state)?;
 
       // Re-tidy the workspace's columns (if any) now a window's gone.
       if let Some(workspace) = workspace {
-        let focus_target = state.focused_container();
         reapply_assigned_columns(&workspace, center, state, config)?;
 
-        // Re-assert focus since render shifts it to center.
+        let focus_target = neighbor_id
+          .and_then(|id| state.container_by_id(id))
+          .or_else(|| state.focused_container());
         if let Some(target) = focus_target {
           set_focused_descendant(&target, None);
           state.pending_sync.queue_focus_change();

@@ -248,6 +248,26 @@ pub fn workspace_center_window_id(workspace: &Workspace) -> Option<Uuid> {
   ColumnGrid::read(workspace).center_window_id()
 }
 
+/// Id of the adjacent window in the same column as `window_id`. Prefers
+/// the next row; falls back to the previous. Returns `None` when the
+/// window is alone in its column or not found in the grid.
+pub fn column_neighbor_of(
+  workspace: &Workspace,
+  window_id: Uuid,
+) -> Option<Uuid> {
+  let grid = ColumnGrid::read(workspace);
+  let (col, row) = grid.find(window_id)?;
+  let column = &grid.columns[col];
+  let neighbor_row = if row + 1 < column.len() {
+    row + 1
+  } else if row > 0 {
+    row - 1
+  } else {
+    return None;
+  };
+  Some(column[neighbor_row].id())
+}
+
 /// Remembers the window leaving the center as the `center` command's
 /// swap-back target.
 ///
