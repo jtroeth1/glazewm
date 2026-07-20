@@ -30,6 +30,15 @@ pub fn manage_window(
     return Ok(());
   };
 
+  // Capture the current center window BEFORE inserting the new window
+  // into the tree. After insertion, the new window's tiling_size can
+  // tie with the old center, causing `center_index()` to pick the new
+  // window instead.
+  let pre_insert_center = state
+    .focused_container()
+    .and_then(|c| c.workspace())
+    .map(|ws| workspace_center_window_id(&ws));
+
   // Create the window instance. This may fail if the window handle has
   // already been destroyed.
   let window = try_warn!(create_window(
@@ -84,28 +93,15 @@ pub fn manage_window(
     });
 
     // Reapply the workspace's columns (if any) so the new tiling window
-    // slots into a side column. Pass the current center so the existing
-    // center stays put — the new window lands in the side stack, not the
-    // center. Re-assert focus on the new window afterwards, since the
-    // tree rebuild can shift the focus chain back to the center.
+    // slots into a side column. Use the center captured before
+    // insertion so the old center stays put. Re-assert focus on the
+    // new window afterwards, since the tree rebuild shifts the focus
+    // chain back to the center.
     if is_tiling {
-      let current_center = workspace_center_window_id(&workspace);
-      tracing::debug!(
-        ?current_center,
-        new_window_id = ?window_container.id(),
-        "Columns reapply: preserving center, focusing new window"
-      );
-      reapply_assigned_columns(&workspace, current_center, state, config)?;
-
+      let center_before = pre_insert_center.flatten();
+      reapply_assigned_columns(&workspace, center_before, state, config)?;
       set_focused_descendant(&window_container, None);
       state.pending_sync.queue_focus_change();
-
-      let focused_after = state.focused_container();
-      tracing::debug!(
-        focused_after = ?focused_after.as_ref().map(|c| c.id()),
-        new_window_id = ?window_container.id(),
-        "Focus state after set_focused_descendant"
-      );
     }
   }
 
