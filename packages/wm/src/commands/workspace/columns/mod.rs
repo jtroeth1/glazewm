@@ -94,6 +94,14 @@ pub fn apply_columns(
 
   let center_window = windows[center_index].clone();
 
+  tracing::debug!(
+    ?preferred_center,
+    ?focused_id,
+    center_chosen_id = ?center_window.id(),
+    window_count = windows.len(),
+    "apply_columns: center selection"
+  );
+
   // A different window is taking the center, so the one it phases out
   // becomes the `center` toggle's swap-back target.
   remember_outgoing_center(workspace, center_window.id(), state);
