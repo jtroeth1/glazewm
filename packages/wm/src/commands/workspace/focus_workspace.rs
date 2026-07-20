@@ -68,10 +68,11 @@ pub fn focus_workspace(
     set_focused_descendant(&container_to_focus, None);
     state.pending_sync.queue_focus_change();
 
-    // Reapply this workspace's columns (if any). Use the stored center
-    // so the layout is preserved across monitor switches.
-    let center = workspace_center_window_id(&target_workspace);
-    reapply_assigned_columns(&target_workspace, center, state, config)?;
+    // Apply columns on first focus (no stored center yet). Skip reapply
+    // on subsequent switches so manual rearrangements are preserved.
+    if workspace_center_window_id(&target_workspace).is_none() {
+      reapply_assigned_columns(&target_workspace, None, state, config)?;
+    }
 
     // Display the workspace to switch focus to.
     state
