@@ -64,21 +64,24 @@ pub fn apply_columns(
 ) -> anyhow::Result<()> {
   let kinds = parse_columns_spec(spec)?;
 
-  let mut windows = workspace
-    .descendants()
-    .filter_map(|container| match container {
-      Container::TilingWindow(window) => Some(window),
-      _ => None,
-    })
-    .collect::<Vec<_>>();
-
-  if windows.len() < 2 {
-    return Ok(());
-  }
-
-  windows.sort_by_key(|window| {
-    window.to_rect().map_or((0, 0), |rect| (rect.x(), rect.y()))
-  });
+  // When reapplying (preferred_center is set), use the tree's existing
+  // left-to-right order — the workspace children already reflect the
+  // correct column layout. Sorting by rect would scramble windows whose
+  // physical positions haven't been redrawn yet (e.g. after a close
+  // flattens a split container). For a fresh layout (no preferred
+  // center), sort by screen position so the initial assignment is
+  // spatially stable.
+  let grid = ColumnGrid::read(workspace);
+  let windows: Vec<TilingWindow> = if preferred_center.is_some() {
+    grid.columns.into_iter().flatten().collect()
+  } else {
+    let mut ws: Vec<TilingWindow> =
+      grid.columns.into_iter().flatten().collect();
+    ws.sort_by_key(|window| {
+      window.to_rect().map_or((0, 0), |rect| (rect.x(), rect.y()))
+    });
+    ws
+  };
 
   // Center = the preferred center window if it's still present, else the
   // focused tiling window, else the middle one by position.
