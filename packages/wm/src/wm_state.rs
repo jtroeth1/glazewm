@@ -133,20 +133,26 @@ impl WmState {
 
     // Manage windows in reverse z-order (bottom to top). This helps to
     // preserve the original stacking order.
-    for native_window in
-      self.dispatcher.visible_windows()?.into_iter().rev()
-    {
+    let visible = self.dispatcher.visible_windows()?;
+    tracing::info!(
+      "Startup: found {} visible windows to manage.",
+      visible.len()
+    );
+
+    for native_window in visible.into_iter().rev() {
       let nearest_workspace = self
         .nearest_monitor(&native_window)
         .and_then(|m| m.displayed_workspace());
 
       if let Some(workspace) = nearest_workspace {
-        manage_window(
+        if let Err(err) = manage_window(
           native_window,
           Some(workspace.into()),
           self,
           config,
-        )?;
+        ) {
+          tracing::warn!("Failed to manage window at startup: {err:#}");
+        }
       }
     }
 

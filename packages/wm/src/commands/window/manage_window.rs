@@ -139,13 +139,19 @@ fn check_is_manageable(
       && native_properties.title == "Flow.Launcher";
 
     if !is_flow_launcher {
-      // Ensure window is top-level (i.e. not a child window). Ignore
-      // windows that cannot be focused or if they're unavailable in
-      // task switcher (alt+tab menu).
-      if native_window.has_window_style(WS_CHILD)
-        || native_window
-          .has_window_style_ex(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-      {
+      let is_child = native_window.has_window_style(WS_CHILD);
+      let is_no_activate =
+        native_window.has_window_style_ex(WS_EX_NOACTIVATE);
+      let is_tool_window =
+        native_window.has_window_style_ex(WS_EX_TOOLWINDOW);
+
+      if is_child || is_no_activate || is_tool_window {
+        tracing::info!(
+          "Skipping window '{}' [{}]: child={is_child}, \
+           no_activate={is_no_activate}, tool_window={is_tool_window}",
+          native_properties.title,
+          native_properties.process_name,
+        );
         return Ok(None);
       }
 
@@ -157,6 +163,11 @@ fn check_is_manageable(
       if native_window.has_owner_window()
         && !native_window.has_window_style(WS_CAPTION)
       {
+        tracing::info!(
+          "Skipping window '{}' [{}]: owner window without caption.",
+          native_properties.title,
+          native_properties.process_name,
+        );
         return Ok(None);
       }
     }
