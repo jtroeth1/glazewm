@@ -7,7 +7,8 @@ use std::{
 use anyhow::Context;
 use uuid::Uuid;
 use wm_common::{
-  ContainerDto, GapsConfig, TilingDirection, WorkspaceConfig, WorkspaceDto,
+  ColumnsMode, ContainerDto, GapsConfig, TilingDirection, WorkspaceConfig,
+  WorkspaceDto,
 };
 use wm_platform::{Rect, RectDelta};
 
@@ -32,9 +33,12 @@ struct WorkspaceInner {
   config: WorkspaceConfig,
   gaps_config: GapsConfig,
   tiling_direction: TilingDirection,
-  /// Id of the window currently occupying the `C` column, set by
-  /// `apply_columns` and read by `workspace_center_window_id`.
-  center_window_id: Option<Uuid>,
+  /// Stable creation-order list of tiling window IDs. The single source
+  /// of truth for window ordering in column layouts: `[0]` occupies the
+  /// `C` column in master-stack mode, `[1..]` fill the `*` columns.
+  window_order: Vec<Uuid>,
+  /// Current column layout mode for this workspace.
+  columns_mode: ColumnsMode,
 }
 
 impl Workspace {
@@ -51,7 +55,8 @@ impl Workspace {
       config,
       gaps_config,
       tiling_direction,
-      center_window_id: None,
+      window_order: Vec::new(),
+      columns_mode: ColumnsMode::default(),
     };
 
     Self(Rc::new(RefCell::new(workspace)))
@@ -67,14 +72,37 @@ impl Workspace {
     self.0.borrow_mut().config = config;
   }
 
-  /// Id of the window currently in the `C` column.
-  pub fn center_window_id(&self) -> Option<Uuid> {
-    self.0.borrow().center_window_id
+  /// Stable creation-order list of tiling window IDs.
+  pub fn window_order(&self) -> Vec<Uuid> {
+    self.0.borrow().window_order.clone()
   }
 
-  /// Store which window occupies the `C` column.
-  pub fn set_center_window_id(&self, id: Option<Uuid>) {
-    self.0.borrow_mut().center_window_id = id;
+  /// Append a tiling window ID to the creation-order buffer.
+  pub fn push_window_order(&self, id: Uuid) {
+    self.0.borrow_mut().window_order.push(id);
+  }
+
+  /// Remove a tiling window ID from the creation-order buffer.
+  pub fn remove_from_window_order(&self, id: Uuid) {
+    self.0.borrow_mut().window_order.retain(|&x| x != id);
+  }
+
+  /// Swap two positions in the window order buffer.
+  pub fn swap_window_order(&self, a: usize, b: usize) {
+    let mut inner = self.0.borrow_mut();
+    if a < inner.window_order.len() && b < inner.window_order.len() {
+      inner.window_order.swap(a, b);
+    }
+  }
+
+  /// Current column layout mode for this workspace.
+  pub fn columns_mode(&self) -> ColumnsMode {
+    self.0.borrow().columns_mode.clone()
+  }
+
+  /// Set the column layout mode.
+  pub fn set_columns_mode(&self, mode: ColumnsMode) {
+    self.0.borrow_mut().columns_mode = mode;
   }
 
   /// Whether the workspace is currently displayed by the parent monitor.
@@ -187,6 +215,7 @@ impl Workspace {
       x: rect.x(),
       y: rect.y(),
       tiling_direction: self.tiling_direction(),
+      columns_mode: self.columns_mode(),
     }))
   }
 }

@@ -5,10 +5,7 @@ use wm_common::WindowState;
 use crate::{
   commands::{
     container::{move_container_within_tree, set_focused_descendant},
-    workspace::{
-      activate_workspace, reapply_columns_after_move,
-      workspace_center_window_id,
-    },
+    workspace::{activate_workspace, reapply_columns_after_move},
   },
   models::{WindowContainer, WorkspaceTarget},
   traits::{CommonGetters, PositionGetters, WindowGetters},
@@ -77,12 +74,11 @@ pub fn move_window_to_workspace(
       window.set_insertion_target(None);
     }
 
-    // Capture columns state before the move: the source's current center
-    // (so its layout re-tidies without shifting center) and the moving
-    // window (so it becomes the target's center on arrival).
     let is_tiling = window.is_tiling_window();
     let moved_window_id = window.id();
-    let source_center = workspace_center_window_id(&current_workspace);
+
+    // Remove from source workspace's window order before the move.
+    current_workspace.remove_from_window_order(moved_window_id);
 
     // Focus target is `None` if the window is not focused.
     let focus_target = state.focus_target_after_removal(&window);
@@ -119,6 +115,9 @@ pub fn move_window_to_workspace(
         )?;
       }
     }
+
+    // Add to target workspace's window order after the move.
+    target_workspace.push_window_order(moved_window_id);
 
     // When moving a focused window within the tree to another workspace,
     // the target workspace will get displayed. If moving the window e.g.
@@ -158,9 +157,7 @@ pub fn move_window_to_workspace(
     if is_tiling {
       reapply_columns_after_move(
         &current_workspace,
-        source_center,
         &target_workspace,
-        moved_window_id,
         state,
         config,
       )?;

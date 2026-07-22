@@ -1,10 +1,7 @@
 use anyhow::Context;
 use tracing::info;
 
-use super::{
-  activate_workspace, reapply_assigned_columns,
-  workspace_center_window_id,
-};
+use super::{activate_workspace, reapply_assigned_columns};
 use crate::{
   commands::{
     container::set_focused_descendant, workspace::deactivate_workspace,
@@ -68,10 +65,10 @@ pub fn focus_workspace(
     set_focused_descendant(&container_to_focus, None);
     state.pending_sync.queue_focus_change();
 
-    // Apply columns on first focus (no stored center yet). Skip reapply
-    // on subsequent switches so manual rearrangements are preserved.
-    if workspace_center_window_id(&target_workspace).is_none() {
-      reapply_assigned_columns(&target_workspace, None, state, config)?;
+    // Apply columns on first focus (buffer not yet populated). Skip
+    // reapply on subsequent switches so manual rearrangements are preserved.
+    if target_workspace.window_order().is_empty() {
+      reapply_assigned_columns(&target_workspace, state, config)?;
     }
 
     // Display the workspace to switch focus to.

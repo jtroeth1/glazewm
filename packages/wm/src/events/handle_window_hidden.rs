@@ -6,10 +6,7 @@ use crate::{
   commands::{
     container::set_focused_descendant,
     window::unmanage_window,
-    workspace::{
-      column_neighbor_of, effective_columns, reapply_assigned_columns,
-      workspace_center_window_id,
-    },
+    workspace::reapply_assigned_columns,
   },
   traits::{CommonGetters, WindowGetters},
   user_config::UserConfig,
@@ -43,29 +40,22 @@ pub fn handle_window_hidden(
     {
       let workspace = window.workspace();
 
-      // Note the current center before unmanaging so the reapply keeps
-      // it in place — closing a side window shouldn't move the center.
-      let center = workspace.as_ref().and_then(workspace_center_window_id);
-
-      // When columns are active, find the adjacent window in the same
-      // column so focus goes to a spatial neighbor.
-      let neighbor_id = workspace.as_ref().and_then(|ws| {
-        effective_columns(ws, config)
-          .ok()
-          .flatten()
-          .is_some()
-          .then(|| column_neighbor_of(ws, window.id()))
-          .flatten()
-      });
+      // Remove from the LIFO order buffer before unmanaging.
+      if let Some(ws) = workspace.as_ref() {
+        ws.remove_from_window_order(window.id());
+      }
 
       unmanage_window(window, state)?;
 
       // Re-tidy the workspace's columns (if any) now a window's gone.
       if let Some(workspace) = workspace {
-        reapply_assigned_columns(&workspace, center, state, config)?;
+        reapply_assigned_columns(&workspace, state, config)?;
 
-        let focus_target = neighbor_id
-          .and_then(|id| state.container_by_id(id))
+        // Focus the last window in the LIFO order buffer.
+        let focus_target = workspace
+          .window_order()
+          .last()
+          .and_then(|id| state.container_by_id(*id))
           .or_else(|| state.focused_container());
         if let Some(target) = focus_target {
           set_focused_descendant(&target, None);

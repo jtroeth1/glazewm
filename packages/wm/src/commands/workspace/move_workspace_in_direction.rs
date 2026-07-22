@@ -4,7 +4,7 @@ use wm_platform::Direction;
 
 use super::{
   activate_workspace, deactivate_workspace, reapply_assigned_columns,
-  sort_workspaces, workspace_center_window_id,
+  sort_workspaces,
 };
 use crate::{
   commands::container::move_container_within_tree,
@@ -52,9 +52,8 @@ pub fn move_workspace_in_direction(
     }
 
     // Reapply the assigned columns so they re-tidy to the template on the
-    // new monitor, keeping the current center window centered.
-    let center = workspace_center_window_id(workspace);
-    reapply_assigned_columns(workspace, center, state, config)?;
+    // new monitor.
+    reapply_assigned_columns(workspace, state, config)?;
 
     state
       .pending_sync

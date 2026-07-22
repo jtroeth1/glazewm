@@ -13,10 +13,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use wm_common::{
   AppCommand, AppMetadataData, BindingModesData, ClientResponseData,
-  ClientResponseMessage, CommandData, EventSubscribeData,
-  EventSubscriptionMessage, FocusedData, MonitorsData, QueryCommand,
-  ServerMessage, SubscribableEvent, TilingDirectionData, WindowsData,
-  WmEvent, WorkspacesData, DEFAULT_IPC_PORT,
+  ClientResponseMessage, ColumnsModeData, CommandData,
+  EventSubscribeData, EventSubscriptionMessage, FocusedData,
+  MonitorsData, QueryCommand, ServerMessage, SubscribableEvent,
+  TilingDirectionData, WindowsData, WmEvent, WorkspacesData,
+  DEFAULT_IPC_PORT,
 };
 
 use crate::{
@@ -242,6 +243,18 @@ impl IpcServer {
         QueryCommand::Paused => {
           ClientResponseData::Paused(wm.state.is_paused)
         }
+        QueryCommand::ColumnsMode => {
+          let workspace = wm
+            .state
+            .focused_container()
+            .and_then(|focused| focused.workspace())
+            .context("No focused workspace.")?;
+
+          ClientResponseData::ColumnsMode(ColumnsModeData {
+            columns_mode: workspace.columns_mode(),
+            workspace: workspace.to_dto()?,
+          })
+        }
       },
       AppCommand::Command {
         subject_container_id,
@@ -387,6 +400,9 @@ impl IpcServer {
         SubscribableEvent::WorkspaceUpdated
       }
       WmEvent::PauseChanged { .. } => SubscribableEvent::PauseChanged,
+      WmEvent::ColumnsModeChanged { .. } => {
+        SubscribableEvent::ColumnsModeChanged
+      }
     };
 
     self

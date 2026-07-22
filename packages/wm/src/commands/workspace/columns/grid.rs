@@ -6,7 +6,8 @@ use wm_common::TilingDirection;
 
 use crate::{
   commands::container::{
-    move_container_within_tree, wrap_in_split_container,
+    move_container_within_tree, set_focused_descendant,
+    wrap_in_split_container,
   },
   models::{
     Container, SplitContainer, TilingContainer, TilingWindow, Workspace,
@@ -76,16 +77,6 @@ impl ColumnGrid {
       .unwrap_or(0)
   }
 
-  /// Id of the window in the center column's top slot, if the workspace
-  /// has any tiling windows.
-  pub fn center_window_id(&self) -> Option<Uuid> {
-    self
-      .columns
-      .get(self.center_index())
-      .and_then(|col| col.first())
-      .map(CommonGetters::id)
-  }
-
   /// `(column, row)` position of the window with `id`, if present.
   pub fn find(&self, id: Uuid) -> Option<(usize, usize)> {
     self.columns.iter().enumerate().find_map(|(col, windows)| {
@@ -133,6 +124,17 @@ impl ColumnGrid {
     // Columns sit side-by-side, so the workspace must tile horizontally.
     workspace.set_tiling_direction(TilingDirection::Horizontal);
     let workspace_container: Container = workspace.clone().into();
+
+    // Capture the focused window before rebuilding the tree, so we can
+    // restore it after Phase 2. `move_container_within_tree` and
+    // `wrap_in_split_container` both manipulate the child focus order,
+    // which can leave the wrong window as the focused descendant.
+    let focused_id = workspace
+      .descendant_focus_order()
+      .find_map(|c| match c {
+        Container::TilingWindow(w) => Some(w.id()),
+        _ => None,
+      });
 
     // Phase 1: pull every window up to the workspace in the final flat
     // order (columns left-to-right, windows top-to-bottom). Moving windows
@@ -182,6 +184,15 @@ impl ColumnGrid {
     for (entity, frac) in column_entities.iter().zip(&fracs) {
       if let Ok(tiling) = entity.as_tiling_container() {
         tiling.set_tiling_size(*frac);
+      }
+    }
+
+    // Restore the originally focused window. The tree rebuilding above
+    // can shuffle the focus chain; putting it back ensures that keyboard
+    // commands (focus, move) start from the right window.
+    if let Some(id) = focused_id {
+      if let Some(container) = state.container_by_id(id) {
+        set_focused_descendant(&container, None);
       }
     }
 

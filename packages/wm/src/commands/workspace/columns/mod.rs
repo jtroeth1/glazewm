@@ -12,7 +12,7 @@ mod spec;
 
 use anyhow::Context;
 use uuid::Uuid;
-use wm_common::{ColumnBias, ColumnLayout};
+use wm_common::{ColumnBias, ColumnLayout, ColumnsMode};
 use wm_platform::Direction;
 
 use self::{
@@ -58,63 +58,58 @@ pub fn apply_columns(
   spec: &str,
   center: f32,
   bias: &ColumnBias,
-  preferred_center: Option<Uuid>,
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
   let kinds = parse_columns_spec(spec)?;
 
-  // When reapplying (preferred_center is set), use the tree's existing
-  // left-to-right order — the workspace children already reflect the
-  // correct column layout. Sorting by rect would scramble windows whose
-  // physical positions haven't been redrawn yet (e.g. after a close
-  // flattens a split container). For a fresh layout (no preferred
-  // center), sort by screen position so the initial assignment is
-  // spatially stable.
-  let grid = ColumnGrid::read(workspace);
-  let windows: Vec<TilingWindow> = if preferred_center.is_some() {
-    grid.columns.into_iter().flatten().collect()
-  } else {
-    let mut ws: Vec<TilingWindow> =
-      grid.columns.into_iter().flatten().collect();
-    ws.sort_by_key(|window| {
-      window.to_rect().map_or((0, 0), |rect| (rect.x(), rect.y()))
-    });
-    ws
-  };
+  // Use the buffer as the source of truth for window ordering.
+  let windows = resolve_ordered_windows(workspace);
 
   if windows.len() < 2 {
     return Ok(());
   }
 
-  // Center = the preferred center window if it's still present, else the
-  // focused tiling window, else the middle one by position.
-  let focused_id = focused_window_id(workspace);
+  // In the buffer model, window_order[0] is always the center.
+  let center_window = windows[0].clone();
+  let rest = windows[1..].to_vec();
 
-  let center_index = preferred_center
-    .and_then(|id| windows.iter().position(|window| window.id() == id))
-    .or_else(|| {
-      focused_id
-        .and_then(|id| windows.iter().position(|window| window.id() == id))
-    })
-    .unwrap_or(windows.len() / 2);
-
-  let center_window = windows[center_index].clone();
-  workspace.set_center_window_id(Some(center_window.id()));
-
-  // A different window is taking the center, so the one it phases out
-  // becomes the `center` toggle's swap-back target.
+  // Remember the outgoing center for `center` toggle support.
   remember_outgoing_center(workspace, center_window.id(), state);
-
-  let rest = windows
-    .iter()
-    .enumerate()
-    .filter(|(index, _)| *index != center_index)
-    .map(|(_, window)| window.clone())
-    .collect::<Vec<_>>();
 
   let columns = distribute_columns(&kinds, center_window, rest, bias);
   let widths = column_widths(&kinds, center.clamp(0.1, 0.9));
+
+  ColumnGrid { columns, widths }.render(workspace, state, config)
+}
+
+/// Arranges the workspace into an equal-width grid with windows
+/// distributed round-robin from the creation-order buffer.
+///
+/// Requires at least 4 tiling windows. Falls back to master-stack if
+/// fewer are present (the caller should check and switch mode).
+fn apply_grid(
+  workspace: &Workspace,
+  num_columns: usize,
+  state: &mut WmState,
+  config: &UserConfig,
+) -> anyhow::Result<()> {
+  let windows = resolve_ordered_windows(workspace);
+
+  if windows.len() < 4 || num_columns == 0 {
+    return Ok(());
+  }
+
+  // Round-robin distribution: [0]→col0, [1]→col1, [2]→col0, ...
+  let mut columns: Vec<Vec<TilingWindow>> =
+    (0..num_columns).map(|_| Vec::new()).collect();
+  for (i, window) in windows.into_iter().enumerate() {
+    columns[i % num_columns].push(window);
+  }
+
+  #[allow(clippy::cast_precision_loss)]
+  let width = 1.0 / num_columns as f32;
+  let widths = vec![width; num_columns];
 
   ColumnGrid { columns, widths }.render(workspace, state, config)
 }
@@ -140,7 +135,7 @@ pub fn assign_columns(
   });
   workspace.set_config(workspace_config);
 
-  apply_columns(workspace, spec, center, bias, None, state, config)
+  apply_columns(workspace, spec, center, bias, state, config)
 }
 
 /// Clears any column layout assigned to the workspace, so switching to it
@@ -183,108 +178,85 @@ pub fn effective_columns(
   Ok(default_columns.columns_for(aspect_ratio))
 }
 
-/// Reapplies the workspace's effective columns, if any (see
-/// [`effective_columns`]: its own assignment, else a monitor-shape-derived
-/// `general.default_columns` rule). Called when a workspace gains focus so
-/// its layout re-asserts on switch-in. A no-op when nothing resolves or
-/// the workspace has fewer than two tiling windows.
-///
-/// `preferred_center` pins which window lands in the `C` column; pass
-/// `None` to center the focused window (switch-in, new window), or the
-/// current center (see [`workspace_center_window_id`]) to keep it stable
-/// across a reapply that shouldn't move the center, such as after a side
-/// window closes.
+/// Reapplies the workspace's effective columns. In master-stack mode
+/// `window_order[0]` occupies the `C` column; in grid mode windows are
+/// distributed round-robin. A no-op when nothing resolves or the
+/// workspace has fewer than two tiling windows.
 ///
 /// The `C` column is sized from the columns' stored `center`, which a
 /// manual resize updates at runtime (see [`store_center_width`]). Reading
-/// from the stored template keeps the center width stable across reapplies
-/// (window add/remove, switch-in) instead of drifting with the tree's
-/// transient sizes; config reload restores the spec value by replacing the
-/// config.
+/// from the stored template keeps the center width stable across
+/// reapplies.
 pub fn reapply_assigned_columns(
   workspace: &Workspace,
-  preferred_center: Option<Uuid>,
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  if let Some(columns) = effective_columns(workspace, config)? {
-    apply_columns(
-      workspace,
-      &columns.spec,
-      columns.center,
-      &columns.bias,
-      preferred_center,
-      state,
-      config,
-    )?;
-  }
+  let Some(columns) = effective_columns(workspace, config)? else {
+    return Ok(());
+  };
 
+  match workspace.columns_mode() {
+    ColumnsMode::MasterStackLeft => {
+      apply_columns(
+        workspace,
+        &columns.spec,
+        columns.center,
+        &columns.bias,
+        state,
+        config,
+      )?;
+    }
+    ColumnsMode::MasterStackRight => {
+      apply_columns(
+        workspace,
+        &reverse_spec(&columns.spec),
+        columns.center,
+        &columns.bias,
+        state,
+        config,
+      )?;
+    }
+    ColumnsMode::Grid => {
+      // Grid needs ≥ 4 windows; use master-stack-left layout while
+      // armed. The mode stays Grid so the next window addition
+      // auto-applies the grid once the threshold is met.
+      if workspace.window_order().len() < 4 {
+        apply_columns(
+          workspace,
+          &columns.spec,
+          columns.center,
+          &columns.bias,
+          state,
+          config,
+        )?;
+      } else {
+        apply_grid(workspace, 2, state, config)?;
+      }
+    }
+
+  }
   Ok(())
 }
 
-/// Reapplies assigned columns after a tiling window moves from `source` to
-/// `target`. The source re-tidies around `source_center` — its center
-/// before the move, captured by the caller so closing the gap doesn't
-/// shift it — and the moved window becomes the center of the target's
-/// layout. A no-op for either workspace that has no assigned columns.
+/// Reapplies assigned columns after a tiling window moves from `source`
+/// to `target`. Both workspaces re-tidy from their own `window_order`
+/// buffers. A no-op for either workspace that has no assigned columns.
 pub fn reapply_columns_after_move(
   source: &Workspace,
-  source_center: Option<Uuid>,
   target: &Workspace,
-  moved_window_id: Uuid,
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  reapply_assigned_columns(source, source_center, state, config)?;
-  reapply_assigned_columns(target, Some(moved_window_id), state, config)?;
+  reapply_assigned_columns(source, state, config)?;
+  reapply_assigned_columns(target, state, config)?;
   Ok(())
 }
 
-/// Id of the window currently in the workspace's `C` column, if stored.
-/// Falls back to width-based inference when no explicit center is set
-/// (e.g. first layout before `apply_columns` runs). Capture this before
-/// unmanaging a closing window so a follow-up
-/// `reapply_assigned_columns` can keep that window centered.
+/// Id of the first window in the workspace's creation-order buffer,
+/// which occupies the `C` column in master-stack mode.
 pub fn workspace_center_window_id(workspace: &Workspace) -> Option<Uuid> {
-  workspace
-    .center_window_id()
-    .or_else(|| ColumnGrid::read(workspace).center_window_id())
-}
-
-/// Id of the nearest neighbor of `window_id` in the column grid.
-///
-/// First looks for an adjacent row in the same column. If the window is
-/// alone in its column, picks the top window of the nearest non-empty
-/// column (preferring the column to the right on tie).
-pub fn column_neighbor_of(
-  workspace: &Workspace,
-  window_id: Uuid,
-) -> Option<Uuid> {
-  let grid = ColumnGrid::read(workspace);
-  let (col, row) = grid.find(window_id)?;
-  let column = &grid.columns[col];
-
-  // Same-column neighbor: next row, or previous.
-  if column.len() > 1 {
-    let neighbor_row = if row + 1 < column.len() {
-      row + 1
-    } else {
-      row - 1
-    };
-    return Some(column[neighbor_row].id());
-  }
-
-  // Alone in column — find the nearest non-empty adjacent column.
-  let candidates = (0..grid.columns.len())
-    .filter(|&c| c != col && !grid.columns[c].is_empty());
-
-  candidates
-    .min_by_key(|&c| {
-      let dist = (c as isize - col as isize).unsigned_abs();
-      (dist, c)
-    })
-    .and_then(|c| grid.columns[c].first())
-    .map(CommonGetters::id)
+  workspace.window_order().first().copied()
 }
 
 /// Remembers the window leaving the center as the `center` command's
@@ -324,8 +296,8 @@ fn workspace_center_width(workspace: &Workspace) -> Option<f32> {
     return None;
   }
 
-  // Use stored center to find the right column index.
-  let center_id = workspace.center_window_id()?;
+  // Use window_order[0] to find the center column index.
+  let center_id = workspace.window_order().first().copied()?;
   let (col, _) = grid.find(center_id)?;
   grid.widths.get(col).copied()
 }
@@ -352,6 +324,16 @@ pub fn store_center_width(workspace: &Workspace) {
   workspace.set_config(config);
 }
 
+/// Reverses a comma-separated column spec so the center column moves to
+/// the opposite side (e.g. `C,*` → `*,C`, `*,C,*` stays symmetric).
+fn reverse_spec(spec: &str) -> String {
+  spec
+    .split(',')
+    .rev()
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
 /// Id of the focused tiling window on the workspace, if any.
 fn focused_window_id(workspace: &Workspace) -> Option<Uuid> {
   workspace.descendant_focus_order().find_map(
@@ -360,6 +342,47 @@ fn focused_window_id(workspace: &Workspace) -> Option<Uuid> {
       _ => None,
     },
   )
+}
+
+/// Resolves the workspace's `window_order` buffer into live
+/// `TilingWindow` objects, preserving creation order. IDs that no longer
+/// exist in the tree (e.g. already unmanaged) are silently skipped.
+fn resolve_ordered_windows(workspace: &Workspace) -> Vec<TilingWindow> {
+  let order = workspace.window_order();
+  let all_windows: Vec<TilingWindow> = workspace
+    .descendant_focus_order()
+    .filter_map(|c| match c {
+      Container::TilingWindow(w) => Some(w),
+      _ => None,
+    })
+    .collect();
+
+  order
+    .iter()
+    .filter_map(|id| all_windows.iter().find(|w| w.id() == *id).cloned())
+    .collect()
+}
+
+/// Toggles the workspace's column layout mode through the cycle
+/// `MasterStackLeft → MasterStackRight → Grid → MasterStackLeft`, then
+/// reapplies. Grid mode requires ≥ 4 windows and auto-falls back to
+/// master-stack-left when that threshold isn't met.
+pub fn toggle_columns_mode(
+  workspace: &Workspace,
+  forced: Option<ColumnsMode>,
+  state: &mut WmState,
+  config: &UserConfig,
+) -> anyhow::Result<()> {
+  let new_mode = forced.unwrap_or_else(|| {
+    match workspace.columns_mode() {
+      ColumnsMode::MasterStackLeft => ColumnsMode::MasterStackRight,
+      ColumnsMode::MasterStackRight => ColumnsMode::Grid,
+      ColumnsMode::Grid => ColumnsMode::MasterStackLeft,
+    }
+  });
+
+  workspace.set_columns_mode(new_mode);
+  reapply_assigned_columns(workspace, state, config)
 }
 
 /// Rotates the windows of the focused workspace by one slot, keeping the
@@ -628,17 +651,73 @@ pub fn move_window_in_columns(
   Ok(true)
 }
 
+/// Focuses the spatially adjacent window within a workspace's column
+/// grid, returning whether the focus was handled here.
+///
+/// `Up`/`Down` moves to the window above/below in the same column.
+/// `Left`/`Right` moves to the nearest window (by row) in the adjacent
+/// column. At a column edge, returns `false` so the caller can fall
+/// through to cross-monitor focus.
+pub fn focus_in_columns(
+  window: &WindowContainer,
+  direction: &Direction,
+  state: &mut WmState,
+  config: &UserConfig,
+) -> anyhow::Result<bool> {
+  let WindowContainer::TilingWindow(tiling) = window else {
+    return Ok(false);
+  };
+
+  let Some(workspace) = tiling.workspace() else {
+    return Ok(false);
+  };
+
+  if effective_columns(&workspace, config)?.is_none() {
+    return Ok(false);
+  }
+
+  let grid = ColumnGrid::read(&workspace);
+  let Some((col, row)) = grid.find(tiling.id()) else {
+    return Ok(false);
+  };
+
+  let target_id = match direction {
+    Direction::Up if row > 0 => grid.columns[col][row - 1].id(),
+    Direction::Down if row + 1 < grid.columns[col].len() => {
+      grid.columns[col][row + 1].id()
+    }
+    Direction::Left if col > 0 => {
+      let target_row =
+        row.min(grid.columns[col - 1].len().saturating_sub(1));
+      grid.columns[col - 1][target_row].id()
+    }
+    Direction::Right if col + 1 < grid.columns.len() => {
+      let target_row =
+        row.min(grid.columns[col + 1].len().saturating_sub(1));
+      grid.columns[col + 1][target_row].id()
+    }
+    // Edge of grid — let caller handle cross-monitor focus.
+    _ => return Ok(false),
+  };
+
+  focus_container_by_id(&target_id, state)?;
+  state.pending_sync.queue_focus_change().queue_cursor_jump();
+
+  Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
   use uuid::Uuid;
-  use wm_common::{ColumnBias, ParsedConfig};
+  use wm_common::{ColumnBias, ColumnsMode, ParsedConfig};
   use wm_platform::{Direction, Rect};
 
   use super::{
-    apply_center, apply_columns, apply_rotate, assign_columns,
-    effective_columns, focused_window_id, grid::ColumnGrid,
-    move_window_in_columns, reapply_assigned_columns, store_center_width,
-    unassign_columns, workspace_center_window_id,
+    apply_center, apply_columns, apply_grid, apply_rotate,
+    assign_columns, effective_columns, focused_window_id,
+    grid::ColumnGrid, move_window_in_columns, reapply_assigned_columns,
+    store_center_width, toggle_columns_mode, unassign_columns,
+    workspace_center_window_id,
   };
   use crate::{
     commands::{
@@ -654,652 +733,272 @@ mod tests {
     wm_state::WmState,
   };
 
-  /// A workspace of `window_count` tiling windows, live under a fresh
-  /// `WmState`'s root so id lookups and window rects resolve. Returns the
-  /// state, workspace, and the windows (in attach order).
-  fn setup(
-    window_count: usize,
-  ) -> (WmState, Workspace, Vec<TilingWindow>) {
+  fn setup(window_count: usize) -> (WmState, Workspace, Vec<TilingWindow>) {
     let state = mock_wm_state();
-
-    let windows = (0..window_count)
-      .map(|_| TilingWindow::mock().call())
-      .collect::<Vec<_>>();
-
+    let windows = (0..window_count).map(|_| TilingWindow::mock().call()).collect::<Vec<_>>();
     let workspace = Workspace::mock()
-      .tiling_containers(
-        windows
-          .iter()
-          .cloned()
-          .map(TilingContainer::TilingWindow)
-          .collect(),
-      )
+      .tiling_containers(windows.iter().cloned().map(TilingContainer::TilingWindow).collect())
       .call();
-
-    let monitor =
-      Monitor::mock().workspaces(vec![workspace.clone()]).call();
-    attach_container(
-      &monitor.into(),
-      &state.root_container.clone().into(),
-      None,
-    )
-    .unwrap();
-
+    for window in &windows { workspace.push_window_order(window.id()); }
+    let monitor = Monitor::mock().workspaces(vec![workspace.clone()]).call();
+    attach_container(&monitor.into(), &state.root_container.clone().into(), None).unwrap();
     (state, workspace, windows)
   }
 
-  /// Attaches a monitor at `bounds` holding one workspace of `count`
-  /// tiling windows under `state`'s root. Returns the workspace and its
-  /// windows. Use distinct, non-overlapping `bounds` to place monitors
-  /// adjacently so `monitor_in_direction` resolves.
-  fn add_monitor(
-    state: &WmState,
-    bounds: Rect,
-    count: usize,
-  ) -> (Workspace, Vec<TilingWindow>) {
-    let windows = (0..count)
-      .map(|_| TilingWindow::mock().call())
-      .collect::<Vec<_>>();
-
+  fn add_monitor(state: &WmState, bounds: Rect, count: usize) -> (Workspace, Vec<TilingWindow>) {
+    let windows = (0..count).map(|_| TilingWindow::mock().call()).collect::<Vec<_>>();
     let workspace = Workspace::mock()
-      .tiling_containers(
-        windows
-          .iter()
-          .cloned()
-          .map(TilingContainer::TilingWindow)
-          .collect(),
-      )
+      .tiling_containers(windows.iter().cloned().map(TilingContainer::TilingWindow).collect())
       .call();
-
-    let monitor = Monitor::mock()
-      .bounds(bounds)
-      .workspaces(vec![workspace.clone()])
-      .call();
-
-    attach_container(
-      &monitor.into(),
-      &state.root_container.clone().into(),
-      None,
-    )
-    .unwrap();
-
+    for window in &windows { workspace.push_window_order(window.id()); }
+    let monitor = Monitor::mock().bounds(bounds).workspaces(vec![workspace.clone()]).call();
+    attach_container(&monitor.into(), &state.root_container.clone().into(), None).unwrap();
     (workspace, windows)
   }
 
-  /// A `UserConfig` whose `general.default_columns` maps wide monitors to
-  /// the given `spec` (the mock monitor's aspect ratio is ~1.6).
   fn config_with_default_columns(spec: &str) -> UserConfig {
-    let yaml = format!(
-      "general:\n  default_columns:\n    - min_aspect_ratio: 1.5\n      spec: '{spec}'\n"
-    );
-    let value: ParsedConfig = serde_yaml::from_str(&yaml).unwrap();
-    UserConfig::mock(value)
+    let yaml = format!("general:\n  default_columns:\n    - min_aspect_ratio: 1.5\n      spec: '{spec}'\n");
+    UserConfig::mock(serde_yaml::from_str::<ParsedConfig>(&yaml).unwrap())
   }
 
-  /// The window ids in each column, top-to-bottom, left-to-right.
   fn id_grid(workspace: &Workspace) -> Vec<Vec<Uuid>> {
-    ColumnGrid::read(workspace)
-      .columns
-      .iter()
-      .map(|column| column.iter().map(CommonGetters::id).collect())
-      .collect()
+    ColumnGrid::read(workspace).columns.iter().map(|col| col.iter().map(CommonGetters::id).collect()).collect()
   }
 
-  /// `*,C,*` lays 5 windows into 2/1/2 columns with the preferred center
-  /// in the wide middle column at its configured width.
   #[test]
   fn applies_star_center_star_layout() {
     let (mut state, workspace, windows) = setup(5);
-    let config = mock_user_config();
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[0], ids[1]], vec![ids[2]], vec![ids[3], ids[4]]]
-    );
-
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &mock_user_config()).unwrap();
+    assert_eq!(id_grid(&workspace), vec![vec![ids[1], ids[2]], vec![ids[0]], vec![ids[3], ids[4]]]);
     let grid = ColumnGrid::read(&workspace);
     assert_eq!(grid.center_index(), 1);
-    assert!((grid.center_width().unwrap() - 0.6).abs() < 1e-3);
-    assert!((grid.widths[0] - 0.2).abs() < 1e-3);
-    assert!((grid.widths[2] - 0.2).abs() < 1e-3);
+    assert!((grid.widths[grid.center_index()] - 0.6).abs() < 1e-3);
   }
 
-  /// `2,C,*` fixes the left column at two windows, centers the preferred
-  /// window, and lets the `*` column absorb the remaining three.
   #[test]
   fn applies_fixed_column_layout() {
     let (mut state, workspace, windows) = setup(6);
-    let config = mock_user_config();
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "2,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert_eq!(
-      id_grid(&workspace),
-      vec![
-        vec![ids[0], ids[1]],
-        vec![ids[2]],
-        vec![ids[3], ids[4], ids[5]],
-      ]
-    );
-
-    let grid = ColumnGrid::read(&workspace);
-    assert_eq!(grid.center_index(), 1);
-    assert!((grid.center_width().unwrap() - 0.6).abs() < 1e-3);
-    assert!((grid.widths[0] - 0.2).abs() < 1e-3);
-    assert!((grid.widths[2] - 0.2).abs() < 1e-3);
+    apply_columns(&workspace, "2,C,*", 0.6, &ColumnBias::Left, &mut state, &mock_user_config()).unwrap();
+    assert_eq!(id_grid(&workspace), vec![vec![ids[1], ids[2]], vec![ids[0]], vec![ids[3], ids[4], ids[5]]]);
   }
 
-  /// Clockwise rotate advances every window one slot around the center
-  /// while the 2/1/2 column shape stays fixed.
   #[test]
   fn rotates_windows_clockwise_keeping_shape() {
     let (mut state, workspace, windows) = setup(5);
-    let config = mock_user_config();
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
+    let config = mock_user_config();
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
     apply_rotate(&workspace, false, &mut state, &config).unwrap();
-
-    // Ring bottom-left → top-left → center → top-right → bottom-right,
-    // each slot taking its predecessor's occupant (last wraps to first).
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[1], ids[4]], vec![ids[0]], vec![ids[2], ids[3]]]
-    );
+    assert_eq!(id_grid(&workspace), vec![vec![ids[2], ids[4]], vec![ids[1]], vec![ids[0], ids[3]]]);
   }
 
-  /// Counter-clockwise rotate is the exact reverse.
   #[test]
   fn rotates_windows_counter_clockwise() {
     let (mut state, workspace, windows) = setup(5);
-    let config = mock_user_config();
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
+    let config = mock_user_config();
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
     apply_rotate(&workspace, true, &mut state, &config).unwrap();
-
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[2], ids[0]], vec![ids[3]], vec![ids[4], ids[1]]]
-    );
+    assert_eq!(id_grid(&workspace), vec![vec![ids[0], ids[1]], vec![ids[3]], vec![ids[4], ids[2]]]);
   }
 
-  /// `center` swaps the focused side window into the center (focus
-  /// follows), then toggles back to the displaced window on a repeat
-  /// press.
   #[test]
   fn center_swaps_focused_then_toggles_back() {
     let (mut state, workspace, windows) = setup(5);
-    let config = mock_user_config();
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    let config = mock_user_config();
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
 
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // Focus a side window and center it: it swaps with the old center.
-    focus_container_by_id(&ids[0], &mut state).unwrap();
+    focus_container_by_id(&ids[1], &mut state).unwrap();
     apply_center(&workspace, &mut state, &config).unwrap();
+    assert_eq!(id_grid(&workspace), vec![vec![ids[0], ids[2]], vec![ids[1]], vec![ids[3], ids[4]]]);
+    assert_eq!(focused_window_id(&workspace), Some(ids[1]));
 
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[2], ids[1]], vec![ids[0]], vec![ids[3], ids[4]]]
-    );
+    apply_center(&workspace, &mut state, &config).unwrap();
+    assert_eq!(id_grid(&workspace), vec![vec![ids[1], ids[2]], vec![ids[0]], vec![ids[3], ids[4]]]);
     assert_eq!(focused_window_id(&workspace), Some(ids[0]));
-    assert_eq!(state.last_centered_out, Some(ids[2]));
-
-    // Focused window is now the center, so `center` toggles it back with
-    // the window it displaced.
-    apply_center(&workspace, &mut state, &config).unwrap();
-
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[0], ids[1]], vec![ids[2]], vec![ids[3], ids[4]]]
-    );
-    assert_eq!(focused_window_id(&workspace), Some(ids[2]));
-    assert_eq!(state.last_centered_out, Some(ids[0]));
   }
 
-  /// `Up`/`Down` swaps a window with its vertical neighbour in the column.
   #[test]
   fn moves_window_within_column() {
     let (mut state, workspace, windows) = setup(5);
-    // `move_window_in_columns` only runs when the workspace has effective
-    // columns; a matching `default_columns` rule provides that.
     let config = config_with_default_columns("*,C,*");
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    let window = WindowContainer::TilingWindow(windows[1].clone());
-    let handled =
-      move_window_in_columns(&window, &Direction::Up, &mut state, &config)
-        .unwrap();
-
-    assert!(handled);
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[1], ids[0]], vec![ids[2]], vec![ids[3], ids[4]]]
-    );
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
+    let window = WindowContainer::TilingWindow(windows[2].clone());
+    assert!(move_window_in_columns(&window, &Direction::Up, &mut state, &config).unwrap());
+    assert_eq!(id_grid(&workspace), vec![vec![ids[2], ids[1]], vec![ids[0]], vec![ids[3], ids[4]]]);
   }
 
-  /// Moving a side window into the center displaces the old center out to
-  /// the vacated slot, keeping the center a single window.
   #[test]
   fn moves_into_center_keeps_it_single_window() {
     let (mut state, workspace, windows) = setup(5);
     let config = config_with_default_columns("*,C,*");
     let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    let window = WindowContainer::TilingWindow(windows[0].clone());
-    let handled = move_window_in_columns(
-      &window,
-      &Direction::Right,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert!(handled);
-    assert_eq!(
-      id_grid(&workspace),
-      vec![vec![ids[2], ids[1]], vec![ids[0]], vec![ids[3], ids[4]]]
-    );
+    apply_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
+    let window = WindowContainer::TilingWindow(windows[1].clone());
+    assert!(move_window_in_columns(&window, &Direction::Right, &mut state, &config).unwrap());
+    assert_eq!(id_grid(&workspace), vec![vec![ids[0], ids[2]], vec![ids[1]], vec![ids[3], ids[4]]]);
   }
 
-  /// `move` within a fixed-column layout swaps window-for-window: `Down`
-  /// reorders the fixed column's stack, and `Right` into the center keeps
-  /// the fixed column at two windows and the center at one.
-  #[test]
-  fn moves_within_fixed_column_layout() {
-    let (mut state, workspace, windows) = setup(6);
-    let config = config_with_default_columns("2,C,*");
-    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "2,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // `Down` swaps the two windows stacked in the fixed left column.
-    let top = WindowContainer::TilingWindow(windows[0].clone());
-    assert!(move_window_in_columns(
-      &top,
-      &Direction::Down,
-      &mut state,
-      &config
-    )
-    .unwrap());
-    assert_eq!(
-      id_grid(&workspace),
-      vec![
-        vec![ids[1], ids[0]],
-        vec![ids[2]],
-        vec![ids[3], ids[4], ids[5]],
-      ]
-    );
-
-    // `Right` moves the fixed column's bottom window into the center,
-    // displacing the old center into the vacated slot. Counts are
-    // preserved: the fixed column keeps two, the center keeps one.
-    let bottom = WindowContainer::TilingWindow(windows[0].clone());
-    assert!(move_window_in_columns(
-      &bottom,
-      &Direction::Right,
-      &mut state,
-      &config
-    )
-    .unwrap());
-    assert_eq!(
-      id_grid(&workspace),
-      vec![
-        vec![ids[1], ids[2]],
-        vec![ids[0]],
-        vec![ids[3], ids[4], ids[5]],
-      ]
-    );
-  }
-
-  /// Moving off the outermost column sends the window to the adjacent
-  /// monitor's workspace: the source re-tidies keeping its center, and the
-  /// moved window becomes the target's center. (`Left` is symmetric.)
   #[test]
   fn moves_out_to_horizontally_adjacent_monitor() {
     let mut state = mock_wm_state();
     let config = config_with_default_columns("*,C,*");
-
-    // Two 1680x1050 monitors side by side (aspect ~1.6, so both match the
-    // default-columns rule).
-    let (ws_left, wins_left) =
-      add_monitor(&state, Rect::from_xy(0, 0, 1680, 1050), 5);
-    let (ws_right, _wins_right) =
-      add_monitor(&state, Rect::from_xy(1680, 0, 1680, 1050), 2);
+    let (ws_left, wins_left) = add_monitor(&state, Rect::from_xy(0, 0, 1680, 1050), 5);
+    let (ws_right, _) = add_monitor(&state, Rect::from_xy(1680, 0, 1680, 1050), 2);
     let ids = wins_left.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &ws_left,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // `ids[3]` sits in the rightmost column; moving it `Right` leaves the
-    // workspace for the monitor to the right.
+    apply_columns(&ws_left, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
     let window = WindowContainer::TilingWindow(wins_left[3].clone());
-    let handled = move_window_in_columns(
-      &window,
-      &Direction::Right,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert!(handled);
-    assert_eq!(
-      wins_left[3].workspace().map(|w| w.id()),
-      Some(ws_right.id())
-    );
-    // Source keeps its center; target adopts the arrival as its center.
-    assert_eq!(workspace_center_window_id(&ws_left), Some(ids[2]));
-    assert_eq!(workspace_center_window_id(&ws_right), Some(ids[3]));
+    assert!(move_window_in_columns(&window, &Direction::Right, &mut state, &config).unwrap());
+    assert_eq!(wins_left[3].workspace().map(|w| w.id()), Some(ws_right.id()));
+    assert_eq!(workspace_center_window_id(&ws_left), Some(ids[0]));
   }
 
-  /// The same edge hand-off works vertically: moving off the bottom row
-  /// sends the window to the monitor below. (`Up` is symmetric.)
   #[test]
   fn moves_out_to_vertically_adjacent_monitor() {
     let mut state = mock_wm_state();
     let config = config_with_default_columns("*,C,*");
-
-    // Two monitors stacked top/bottom.
-    let (ws_top, wins_top) =
-      add_monitor(&state, Rect::from_xy(0, 0, 1680, 1050), 5);
-    let (ws_bottom, _wins_bottom) =
-      add_monitor(&state, Rect::from_xy(0, 1050, 1680, 1050), 2);
+    let (ws_top, wins_top) = add_monitor(&state, Rect::from_xy(0, 0, 1680, 1050), 5);
+    let (ws_bottom, _) = add_monitor(&state, Rect::from_xy(0, 1050, 1680, 1050), 2);
     let ids = wins_top.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &ws_top,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // `ids[1]` is the bottom of the left column; `Down` leaves for the
-    // monitor below.
-    let window = WindowContainer::TilingWindow(wins_top[1].clone());
-    let handled = move_window_in_columns(
-      &window,
-      &Direction::Down,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert!(handled);
-    assert_eq!(
-      wins_top[1].workspace().map(|w| w.id()),
-      Some(ws_bottom.id())
-    );
-    assert_eq!(workspace_center_window_id(&ws_top), Some(ids[2]));
-    assert_eq!(workspace_center_window_id(&ws_bottom), Some(ids[1]));
+    apply_columns(&ws_top, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
+    let window = WindowContainer::TilingWindow(wins_top[2].clone());
+    assert!(move_window_in_columns(&window, &Direction::Down, &mut state, &config).unwrap());
+    assert_eq!(wins_top[2].workspace().map(|w| w.id()), Some(ws_bottom.id()));
+    assert_eq!(workspace_center_window_id(&ws_top), Some(ids[0]));
   }
 
-  /// Moving a workspace to a differently-shaped monitor via the real
-  /// `move_workspace_in_direction` command re-resolves its
-  /// `general.default_columns` and reapplies that monitor's layout. This
-  /// covers the command's own reparent + reapply wiring, not just the
-  /// resolution in isolation.
   #[test]
   fn workspace_recolumns_when_moved_to_monitor_with_different_aspect() {
     let mut state = mock_wm_state();
-
-    // Ultrawide (2.1+) → `*,C,*`; standard widescreen (1.5+) → `C,*`.
     let yaml = "general:\n  default_columns:\n    - min_aspect_ratio: 2.1\n      spec: '*,C,*'\n    - min_aspect_ratio: 1.5\n      spec: 'C,*'\n";
-    let value: ParsedConfig = serde_yaml::from_str(yaml).unwrap();
-    let config = UserConfig::mock(value);
-
-    // Ultrawide 3440x1440 (~2.39) with the workspace under test plus a
-    // second workspace, so moving the first out doesn't empty the monitor
-    // (which would need a workspace config to backfill). Standard
-    // 1920x1080 (~1.78) sits to its right.
-    let (workspace, _wins) =
-      add_monitor(&state, Rect::from_xy(0, 0, 3440, 1440), 3);
+    let config = UserConfig::mock(serde_yaml::from_str::<ParsedConfig>(yaml).unwrap());
+    let (workspace, _) = add_monitor(&state, Rect::from_xy(0, 0, 3440, 1440), 3);
     let ultrawide = workspace.monitor().unwrap();
     let filler = Workspace::mock().name("filler".to_string()).call();
-    attach_container(&filler.into(), &ultrawide.clone().into(), None)
-      .unwrap();
+    attach_container(&filler.into(), &ultrawide.clone().into(), None).unwrap();
     add_monitor(&state, Rect::from_xy(3440, 0, 1920, 1080), 0);
-
-    // On the ultrawide, the workspace resolves and applies the 3-column
-    // layout.
-    reapply_assigned_columns(&workspace, None, &mut state, &config)
-      .unwrap();
+    reapply_assigned_columns(&workspace, &mut state, &config).unwrap();
     assert_eq!(ColumnGrid::read(&workspace).columns.len(), 3);
-
-    // Move it right onto the standard monitor with the real command.
-    move_workspace_in_direction(
-      &workspace,
-      &Direction::Right,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // The command re-resolved the layout for the new monitor: a 2-column
-    // `C,*`, with the moved window kept centered.
-    assert_eq!(
-      effective_columns(&workspace, &config)
-        .unwrap()
-        .map(|c| c.spec),
-      Some("C,*".to_string())
-    );
+    move_workspace_in_direction(&workspace, &Direction::Right, &mut state, &config).unwrap();
+    assert_eq!(effective_columns(&workspace, &config).unwrap().map(|c| c.spec), Some("C,*".to_string()));
     assert_eq!(ColumnGrid::read(&workspace).columns.len(), 2);
   }
 
-  /// Without effective columns the move is not handled here, so the caller
-  /// falls back to the default directional mover.
   #[test]
   fn move_without_columns_is_not_handled() {
-    let (mut state, _workspace, windows) = setup(3);
-    let config = mock_user_config();
-
+    let (mut state, _, windows) = setup(3);
     let window = WindowContainer::TilingWindow(windows[0].clone());
-    let handled = move_window_in_columns(
-      &window,
-      &Direction::Left,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert!(!handled);
+    assert!(!move_window_in_columns(&window, &Direction::Left, &mut state, &mock_user_config()).unwrap());
   }
 
-  /// A workspace with no assignment inherits the monitor-shape default.
   #[test]
   fn effective_columns_uses_default_when_unassigned() {
-    let (_state, workspace, _windows) = setup(2);
-    let config = config_with_default_columns("C,*");
-
-    let columns = effective_columns(&workspace, &config).unwrap();
-    assert_eq!(columns.map(|c| c.spec), Some("C,*".to_string()));
+    let (_, workspace, _) = setup(2);
+    assert_eq!(effective_columns(&workspace, &config_with_default_columns("C,*")).unwrap().map(|c| c.spec), Some("C,*".to_string()));
   }
 
-  /// An explicit assignment wins over the monitor-shape default.
   #[test]
   fn effective_columns_prefers_assignment() {
-    let (mut state, workspace, _windows) = setup(2);
+    let (mut state, workspace, _) = setup(2);
     let config = config_with_default_columns("*,C,*");
-
-    assign_columns(
-      &workspace,
-      "1,C",
-      0.6,
-      &ColumnBias::Left,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    let columns = effective_columns(&workspace, &config).unwrap();
-    assert_eq!(columns.map(|c| c.spec), Some("1,C".to_string()));
+    assign_columns(&workspace, "1,C", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
+    assert_eq!(effective_columns(&workspace, &config).unwrap().map(|c| c.spec), Some("1,C".to_string()));
   }
 
-  /// Unassigning clears the workspace's columns so it no longer resolves
-  /// an assignment.
   #[test]
   fn unassign_clears_assignment() {
-    let (mut state, workspace, _windows) = setup(2);
-    let config = mock_user_config();
-
-    assign_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      &mut state,
-      &config,
-    )
-    .unwrap();
+    let (mut state, workspace, _) = setup(2);
+    assign_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &mock_user_config()).unwrap();
     assert!(workspace.config().columns.is_some());
-
     unassign_columns(&workspace);
     assert!(workspace.config().columns.is_none());
   }
 
-  /// The center window id is the top of the widest column.
   #[test]
   fn reports_center_window_id() {
-    let (mut state, workspace, windows) = setup(5);
-    let config = mock_user_config();
-    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
-
-    apply_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      Some(ids[2]),
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    assert_eq!(workspace_center_window_id(&workspace), Some(ids[2]));
+    let (_, workspace, windows) = setup(5);
+    assert_eq!(workspace_center_window_id(&workspace), Some(windows[0].id()));
   }
 
-  /// A manual resize of the center is captured into the assignment so
-  /// later reapplies use the new width.
   #[test]
   fn store_center_width_records_resize() {
     let (mut state, workspace, windows) = setup(5);
     let config = mock_user_config();
-
-    assign_columns(
-      &workspace,
-      "*,C,*",
-      0.6,
-      &ColumnBias::Left,
-      &mut state,
-      &config,
-    )
-    .unwrap();
-
-    // Simulate the user widening the center column (a single-window
-    // column, so its window's tiling size is the column width).
+    assign_columns(&workspace, "*,C,*", 0.6, &ColumnBias::Left, &mut state, &config).unwrap();
     let center_id = workspace_center_window_id(&workspace).unwrap();
-    let center = windows
-      .iter()
-      .find(|window| window.id() == center_id)
-      .unwrap();
+    let center = windows.iter().find(|w| w.id() == center_id).unwrap();
     center.set_tiling_size(0.7);
     store_center_width(&workspace);
+    assert!((workspace.config().columns.unwrap().center - 0.7).abs() < 1e-3);
+  }
 
-    let stored = workspace.config().columns.unwrap().center;
-    assert!((stored - 0.7).abs() < 1e-3);
+  #[test]
+  fn window_order_appends_to_end() {
+    let (_, workspace, windows) = setup(3);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    assert_eq!(workspace.window_order(), vec![ids[0], ids[1], ids[2]]);
+  }
+
+  #[test]
+  fn window_order_remove_preserves_order() {
+    let (_, workspace, windows) = setup(4);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    workspace.remove_from_window_order(ids[1]);
+    assert_eq!(workspace.window_order(), vec![ids[0], ids[2], ids[3]]);
+  }
+
+  #[test]
+  fn lifo_focus_after_close() {
+    let (_, workspace, windows) = setup(4);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    workspace.remove_from_window_order(ids[2]);
+    assert_eq!(workspace.window_order().last().copied(), Some(ids[3]));
+    workspace.remove_from_window_order(ids[3]);
+    assert_eq!(workspace.window_order().last().copied(), Some(ids[1]));
+  }
+
+  #[test]
+  fn grid_distributes_round_robin() {
+    let (mut state, workspace, windows) = setup(4);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    apply_grid(&workspace, 2, &mut state, &mock_user_config()).unwrap();
+    assert_eq!(id_grid(&workspace), vec![vec![ids[0], ids[2]], vec![ids[1], ids[3]]]);
+    let grid = ColumnGrid::read(&workspace);
+    assert!((grid.widths[0] - 0.5).abs() < 1e-3);
+  }
+
+  #[test]
+  fn grid_requires_four_windows() {
+    let (mut state, workspace, _) = setup(3);
+    apply_grid(&workspace, 2, &mut state, &mock_user_config()).unwrap();
+    assert_eq!(ColumnGrid::read(&workspace).columns.len(), 3);
+  }
+
+  #[test]
+  fn toggle_columns_mode_cycles() {
+    let (mut state, workspace, _) = setup(5);
+    let config = config_with_default_columns("C,*");
+    assert_eq!(workspace.columns_mode(), ColumnsMode::MasterStackLeft);
+    toggle_columns_mode(&workspace, None, &mut state, &config).unwrap();
+    assert_eq!(workspace.columns_mode(), ColumnsMode::MasterStackRight);
+    toggle_columns_mode(&workspace, None, &mut state, &config).unwrap();
+    assert_eq!(workspace.columns_mode(), ColumnsMode::Grid);
+    toggle_columns_mode(&workspace, None, &mut state, &config).unwrap();
+    assert_eq!(workspace.columns_mode(), ColumnsMode::MasterStackLeft);
+  }
+
+  #[test]
+  fn grid_armed_with_fewer_than_four_windows() {
+    let (mut state, workspace, _) = setup(3);
+    let config = config_with_default_columns("C,*");
+    workspace.set_columns_mode(ColumnsMode::Grid);
+    reapply_assigned_columns(&workspace, &mut state, &config).unwrap();
+    // Mode stays armed; layout falls back to master-stack.
+    assert_eq!(workspace.columns_mode(), ColumnsMode::Grid);
+    assert_eq!(ColumnGrid::read(&workspace).columns.len(), 2);
   }
 }

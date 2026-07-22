@@ -7,7 +7,7 @@ use crate::{
   commands::{
     container::{attach_container, set_focused_descendant},
     window::run_window_rules,
-    workspace::{reapply_assigned_columns, workspace_center_window_id},
+    workspace::reapply_assigned_columns,
   },
   models::{
     Container, Monitor, NativeWindowProperties, NonTilingWindow,
@@ -30,14 +30,6 @@ pub fn manage_window(
     return Ok(());
   };
 
-  // Capture the current center window BEFORE inserting the new window
-  // into the tree. After insertion, the new window's tiling_size can
-  // tie with the old center, causing `center_index()` to pick the new
-  // window instead.
-  let pre_insert_center = state
-    .focused_container()
-    .and_then(|c| c.workspace())
-    .map(|ws| workspace_center_window_id(&ws));
 
   // Create the window instance. This may fail if the window handle has
   // already been destroyed.
@@ -92,14 +84,13 @@ pub fn manage_window(
       window_container.clone()
     });
 
-    // Reapply the workspace's columns (if any) so the new tiling window
-    // slots into a side column. Use the center captured before
-    // insertion so the old center stays put. Re-assert focus on the
-    // new window afterwards, since the tree rebuild shifts the focus
+    // Reapply the workspace's columns (if any) so the new tiling
+    // window slots into a side column. Re-assert focus on the new
+    // window afterwards, since the tree rebuild shifts the focus
     // chain back to the center.
     if is_tiling {
-      let center_before = pre_insert_center.flatten();
-      reapply_assigned_columns(&workspace, center_before, state, config)?;
+      workspace.push_window_order(window_container.id());
+      reapply_assigned_columns(&workspace, state, config)?;
       set_focused_descendant(&window_container, None);
       state.pending_sync.queue_focus_change();
     }

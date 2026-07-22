@@ -323,6 +323,10 @@ keybindings:
   - commands: ['toggle-tiling-direction']
     bindings: ['alt+v']
 
+  # Toggle between master-stack and grid column layout.
+  - commands: ['toggle-columns-mode']
+    bindings: ['alt+g']
+
   # Change focus from tiling windows -> floating -> fullscreen.
   - commands: ['wm-cycle-focus']
     bindings: ['alt+space']

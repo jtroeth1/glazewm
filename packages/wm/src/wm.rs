@@ -34,8 +34,7 @@ use crate::{
       apply_center, apply_columns, apply_rotate, assign_columns,
       effective_columns, focus_workspace, move_window_in_columns,
       move_workspace_in_direction, reapply_assigned_columns,
-      unassign_columns, update_workspace_config,
-      workspace_center_window_id,
+      toggle_columns_mode, unassign_columns, update_workspace_config,
     },
   },
   events::{
@@ -268,7 +267,7 @@ impl WindowManager {
       }
       InvokeCommand::Focus(args) => {
         if let Some(direction) = &args.direction {
-          focus_in_direction(&subject_container, direction, state)?;
+          focus_in_direction(&subject_container, direction, state, config)?;
         }
 
         if let Some(direction) = &args.workspace_in_direction {
@@ -351,15 +350,13 @@ impl WindowManager {
         if args.is_unset()
           && effective_columns(&workspace, config)?.is_some()
         {
-          let center = workspace_center_window_id(&workspace);
-          reapply_assigned_columns(&workspace, center, state, config)
+          reapply_assigned_columns(&workspace, state, config)
         } else {
           apply_columns(
             &workspace,
             args.spec_or_default(),
             args.center_or_default(),
             &args.bias_or_default(),
-            None,
             state,
             config,
           )
@@ -842,6 +839,19 @@ impl WindowManager {
         Ok(())
       }
       InvokeCommand::WmReloadConfig => reload_config(state, config),
+      InvokeCommand::ToggleColumnsMode { mode } => {
+        let workspace =
+          subject_container.workspace().context("No workspace.")?;
+
+        toggle_columns_mode(&workspace, mode.clone(), state, config)?;
+
+        state.emit_event(WmEvent::ColumnsModeChanged {
+          workspace: workspace.to_dto()?,
+          new_columns_mode: workspace.columns_mode(),
+        });
+
+        Ok(())
+      }
       InvokeCommand::WmTogglePause => {
         toggle_pause(state);
         Ok(())

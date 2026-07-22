@@ -130,6 +130,8 @@ pub enum QueryCommand {
   Workspaces,
   /// Outputs whether the window manager is paused.
   Paused,
+  /// Outputs the columns mode of the focused workspace.
+  ColumnsMode,
 }
 
 #[derive(Clone, Debug, PartialEq, ValueEnum)]
@@ -151,6 +153,7 @@ pub enum SubscribableEvent {
   WorkspaceDeactivated,
   WorkspaceUpdated,
   PauseChanged,
+  ColumnsModeChanged,
 }
 
 #[derive(Clone, Debug, Parser, PartialEq, Serialize)]
@@ -236,6 +239,11 @@ pub enum InvokeCommand {
   ToggleMinimized,
   ToggleTiling,
   ToggleTilingDirection,
+  ToggleColumnsMode {
+    /// Force a specific mode instead of cycling.
+    #[clap(long, value_enum)]
+    mode: Option<ColumnsMode>,
+  },
   SetTilingDirection {
     #[clap(required = true)]
     tiling_direction: TilingDirection,
@@ -360,6 +368,21 @@ pub enum ColumnBias {
   #[default]
   Left,
   Right,
+}
+
+#[derive(
+  Clone, Debug, Default, Deserialize, PartialEq, Serialize, ValueEnum,
+)]
+#[clap(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnsMode {
+  /// Master-stack layout with center column on the left.
+  #[default]
+  MasterStackLeft,
+  /// Master-stack layout with center column on the right.
+  MasterStackRight,
+  /// Grid layout: windows distributed round-robin across equal columns.
+  Grid,
 }
 
 #[derive(Args, Clone, Debug, PartialEq, Serialize)]

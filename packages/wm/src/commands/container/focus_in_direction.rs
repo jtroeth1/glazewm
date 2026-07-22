@@ -4,8 +4,10 @@ use wm_platform::Direction;
 
 use super::set_focused_descendant;
 use crate::{
-  models::{Container, TilingContainer},
+  commands::workspace::focus_in_columns,
+  models::{Container, TilingContainer, WindowContainer},
   traits::{CommonGetters, TilingDirectionGetters, WindowGetters},
+  user_config::UserConfig,
   wm_state::WmState,
 };
 
@@ -13,9 +15,16 @@ pub fn focus_in_direction(
   origin_container: &Container,
   direction: &Direction,
   state: &mut WmState,
+  config: &UserConfig,
 ) -> anyhow::Result<()> {
   let focus_target = match origin_container {
-    Container::TilingWindow(_) => {
+    Container::TilingWindow(tiling) => {
+      // Columns-aware focus: spatial row matching within the grid.
+      let window = WindowContainer::TilingWindow(tiling.clone());
+      if focus_in_columns(&window, direction, state, config)? {
+        return Ok(());
+      }
+
       // If a suitable focus target isn't found in the current workspace,
       // attempt to find a workspace in the given direction.
       tiling_focus_target(origin_container, direction)?.map_or_else(

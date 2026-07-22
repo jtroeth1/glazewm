@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{BindingModeConfig, ContainerDto, TilingDirection, WmEvent};
+use crate::{
+  BindingModeConfig, ColumnsMode, ContainerDto, TilingDirection, WmEvent,
+};
 
 pub const DEFAULT_IPC_PORT: u32 = 6123;
 
@@ -35,6 +37,7 @@ pub enum ClientResponseData {
   Windows(WindowsData),
   Workspaces(WorkspacesData),
   Paused(bool),
+  ColumnsMode(ColumnsModeData),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,6 +93,13 @@ pub struct WindowsData {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacesData {
   pub workspaces: Vec<ContainerDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnsModeData {
+  pub columns_mode: ColumnsMode,
+  pub workspace: ContainerDto,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

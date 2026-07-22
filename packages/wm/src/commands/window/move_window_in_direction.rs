@@ -9,7 +9,7 @@ use crate::{
       move_container_within_tree, resize_tiling_container,
       set_focused_descendant, wrap_in_split_container,
     },
-    workspace::{reapply_columns_after_move, workspace_center_window_id},
+    workspace::reapply_columns_after_move,
   },
   models::{
     DirectionContainer, Monitor, NonTilingWindow, SplitContainer,
@@ -253,12 +253,11 @@ pub(crate) fn move_to_workspace_in_direction(
       _ => target_workspace.child_count(),
     };
 
-    // Capture columns state before the move: the source's current center
-    // (so its layout re-tidies without shifting center) and the moving
-    // window (so it becomes the target's center on arrival).
     let is_tiling = window_to_move.is_tiling_window();
     let moved_window_id = window_to_move.id();
-    let source_center = workspace_center_window_id(&workspace);
+
+    // Remove from source workspace's window order before the move.
+    workspace.remove_from_window_order(moved_window_id);
 
     // Focus should be reassigned within the original workspace after the
     // window is moved out. For example, if the focus order is 1. tiling
@@ -272,6 +271,9 @@ pub(crate) fn move_to_workspace_in_direction(
       target_index,
       state,
     )?;
+
+    // Add to target workspace's window order after the move.
+    target_workspace.push_window_order(moved_window_id);
 
     if let Some(focus_target) = focus_target {
       set_focused_descendant(
@@ -292,9 +294,7 @@ pub(crate) fn move_to_workspace_in_direction(
     if is_tiling {
       reapply_columns_after_move(
         &workspace,
-        source_center,
         &target_workspace,
-        moved_window_id,
         state,
         config,
       )?;

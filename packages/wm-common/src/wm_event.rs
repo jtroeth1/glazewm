@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::{
   dtos::ContainerDto,
   parsed_config::{BindingModeConfig, ParsedConfig},
-  TilingDirection,
+  ColumnsMode, TilingDirection,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,5 +62,9 @@ pub enum WmEvent {
   },
   PauseChanged {
     is_paused: bool,
+  },
+  ColumnsModeChanged {
+    workspace: ContainerDto,
+    new_columns_mode: ColumnsMode,
   },
 }

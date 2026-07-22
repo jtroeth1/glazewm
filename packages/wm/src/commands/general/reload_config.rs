@@ -144,7 +144,7 @@ fn update_workspace_configs(
   // configs were just replaced from the file, so this also discards any
   // runtime manual center resize. A no-op for workspaces without columns.
   for workspace in state.workspaces() {
-    reapply_assigned_columns(&workspace, None, state, config)?;
+    reapply_assigned_columns(&workspace, state, config)?;
   }
 
   Ok(())
