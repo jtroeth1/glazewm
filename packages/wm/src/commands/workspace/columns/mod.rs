@@ -86,6 +86,11 @@ pub fn apply_columns(
 /// Arranges the workspace into an equal-width grid with windows
 /// distributed round-robin from the creation-order buffer.
 ///
+/// When the workspace carries a `grid_affinity` target (set by
+/// `manage_window` when a new window opens), the newest window is
+/// swapped into the affinity target's column so it lands visually
+/// adjacent to the previously focused window.
+///
 /// Requires at least 4 tiling windows. Falls back to master-stack if
 /// fewer are present (the caller should check and switch mode).
 fn apply_grid(
@@ -105,6 +110,39 @@ fn apply_grid(
     (0..num_columns).map(|_| Vec::new()).collect();
   for (i, window) in windows.into_iter().enumerate() {
     columns[i % num_columns].push(window);
+  }
+
+  // When a new window was just added, place it in the same column
+  // as the previously focused window (the affinity target). Swap
+  // the newest window with the last window in the target column.
+  if let Some(affinity_id) = workspace.take_grid_affinity() {
+    let newest_id =
+      workspace.window_order().last().copied();
+
+    if let Some(nid) = newest_id {
+      let aff_col = columns.iter().position(|col| {
+        col.iter().any(|w| w.id() == affinity_id)
+      });
+      let new_pos =
+        columns.iter().enumerate().find_map(|(ci, col)| {
+          col
+            .iter()
+            .enumerate()
+            .find_map(|(ri, w)| {
+              (w.id() == nid).then_some((ci, ri))
+            })
+        });
+
+      if let (Some(ac), Some((nc, nr))) = (aff_col, new_pos) {
+        if ac != nc {
+          let last = columns[ac].len() - 1;
+          let newest = columns[nc].remove(nr);
+          let displaced = columns[ac].remove(last);
+          columns[ac].push(newest);
+          columns[nc].insert(nr, displaced);
+        }
+      }
+    }
   }
 
   #[allow(clippy::cast_precision_loss)]
@@ -1000,5 +1038,82 @@ mod tests {
     // Mode stays armed; layout falls back to master-stack.
     assert_eq!(workspace.columns_mode(), ColumnsMode::Grid);
     assert_eq!(ColumnGrid::read(&workspace).columns.len(), 2);
+  }
+
+  #[test]
+  fn grid_affinity_places_newest_in_focused_column() {
+    // Start with 3 windows in armed-grid, then add a 4th.
+    // Without affinity: round-robin gives [0,2] [1,3].
+    // With affinity on window 0: expect [0,3] [1,2] — the
+    // newest (3) lands in window 0's column.
+    let (mut state, workspace, windows) = setup(4);
+    let ids: Vec<Uuid> =
+      windows.iter().map(CommonGetters::id).collect();
+
+    // Set affinity to window 0 (simulating manage_window
+    // setting it to the previously focused window).
+    workspace.set_grid_affinity(Some(ids[0]));
+    apply_grid(
+      &workspace,
+      2,
+      &mut state,
+      &mock_user_config(),
+    )
+    .unwrap();
+
+    assert_eq!(
+      id_grid(&workspace),
+      vec![vec![ids[0], ids[3]], vec![ids[1], ids[2]]]
+    );
+  }
+
+  #[test]
+  fn grid_no_affinity_is_normal_round_robin() {
+    // Without affinity the layout is plain round-robin.
+    let (mut state, workspace, windows) = setup(4);
+    let ids: Vec<Uuid> =
+      windows.iter().map(CommonGetters::id).collect();
+
+    apply_grid(
+      &workspace,
+      2,
+      &mut state,
+      &mock_user_config(),
+    )
+    .unwrap();
+
+    assert_eq!(
+      id_grid(&workspace),
+      vec![vec![ids[0], ids[2]], vec![ids[1], ids[3]]]
+    );
+  }
+
+  #[test]
+  fn grid_affinity_noop_when_same_column() {
+    // When the affinity target is already in the newest
+    // window's column, no swap occurs.
+    let (mut state, workspace, windows) = setup(5);
+    let ids: Vec<Uuid> =
+      windows.iter().map(CommonGetters::id).collect();
+
+    // Window 4 (last, idx 4) goes to col 0 via round-robin
+    // (4 % 2 == 0). Set affinity to window 0 (also col 0).
+    workspace.set_grid_affinity(Some(ids[0]));
+    apply_grid(
+      &workspace,
+      2,
+      &mut state,
+      &mock_user_config(),
+    )
+    .unwrap();
+
+    // Same as normal round-robin — no swap needed.
+    assert_eq!(
+      id_grid(&workspace),
+      vec![
+        vec![ids[0], ids[2], ids[4]],
+        vec![ids[1], ids[3]]
+      ]
+    );
   }
 }

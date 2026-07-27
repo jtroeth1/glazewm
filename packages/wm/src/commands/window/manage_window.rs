@@ -89,6 +89,16 @@ pub fn manage_window(
     // window afterwards, since the tree rebuild shifts the focus
     // chain back to the center.
     if is_tiling {
+      // Tell `apply_grid` to place the new window in the same
+      // column as the currently focused tiling window.
+      let affinity = workspace
+        .descendant_focus_order()
+        .find_map(|c| match c {
+          Container::TilingWindow(w) => Some(w.id()),
+          _ => None,
+        });
+      workspace.set_grid_affinity(affinity);
+
       workspace.push_window_order(window_container.id());
       reapply_assigned_columns(&workspace, state, config)?;
       set_focused_descendant(&window_container, None);

@@ -37,6 +37,11 @@ struct WorkspaceInner {
   /// of truth for window ordering in column layouts: `[0]` occupies the
   /// `C` column in master-stack mode, `[1..]` fill the `*` columns.
   window_order: Vec<Uuid>,
+  /// When set, the next `apply_grid` call places the newest window
+  /// in the same column as this window ID, then clears the field.
+  /// Set by `manage_window` so a freshly opened window lands
+  /// visually adjacent to the previously focused window.
+  grid_affinity: Option<Uuid>,
   /// Current column layout mode for this workspace.
   columns_mode: ColumnsMode,
 }
@@ -56,6 +61,7 @@ impl Workspace {
       gaps_config,
       tiling_direction,
       window_order: Vec::new(),
+      grid_affinity: None,
       columns_mode: ColumnsMode::default(),
     };
 
@@ -103,6 +109,17 @@ impl Workspace {
   /// Set the column layout mode.
   pub fn set_columns_mode(&self, mode: ColumnsMode) {
     self.0.borrow_mut().columns_mode = mode;
+  }
+
+  /// Set the grid affinity target so the next `apply_grid` places
+  /// the newest window in this window's column.
+  pub fn set_grid_affinity(&self, id: Option<Uuid>) {
+    self.0.borrow_mut().grid_affinity = id;
+  }
+
+  /// Consume the grid affinity target (read and clear).
+  pub fn take_grid_affinity(&self) -> Option<Uuid> {
+    self.0.borrow_mut().grid_affinity.take()
   }
 
   /// Whether the workspace is currently displayed by the parent monitor.
