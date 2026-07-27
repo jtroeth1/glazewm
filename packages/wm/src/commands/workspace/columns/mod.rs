@@ -133,6 +133,11 @@ fn apply_grid(
             })
         });
 
+      tracing::info!(
+        "Grid affinity: target={affinity_id}, newest={nid}, \
+         aff_col={aff_col:?}, new_pos={new_pos:?}"
+      );
+
       if let (Some(ac), Some((nc, nr))) = (aff_col, new_pos) {
         if ac != nc {
           let last = columns[ac].len() - 1;
@@ -140,7 +145,18 @@ fn apply_grid(
           let displaced = columns[ac].remove(last);
           columns[ac].push(newest);
           columns[nc].insert(nr, displaced);
+          tracing::info!(
+            "Grid affinity: swapped newest into col {ac}"
+          );
+        } else {
+          tracing::info!(
+            "Grid affinity: already in same column, no swap"
+          );
         }
+      } else {
+        tracing::info!(
+          "Grid affinity: target or newest not found in grid"
+        );
       }
     }
   }

@@ -90,11 +90,16 @@ pub fn manage_window(
     // chain back to the center.
     if is_tiling {
       // Tell `apply_grid` to place the new window in the same
-      // column as the currently focused tiling window.
+      // column as the previously focused tiling window.
+      // Exclude the new window itself — it was already made
+      // focus descendant at line 46 above.
+      let new_id = window_container.id();
       let affinity = workspace
         .descendant_focus_order()
         .find_map(|c| match c {
-          Container::TilingWindow(w) => Some(w.id()),
+          Container::TilingWindow(w) if w.id() != new_id => {
+            Some(w.id())
+          }
           _ => None,
         });
       workspace.set_grid_affinity(affinity);
