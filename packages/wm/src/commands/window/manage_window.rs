@@ -1,6 +1,8 @@
 use anyhow::Context;
 use tracing::info;
-use wm_common::{try_warn, WindowRuleEvent, WindowState, WmEvent};
+use wm_common::{
+  try_warn, ColumnsMode, WindowRuleEvent, WindowState, WmEvent,
+};
 use wm_platform::{NativeWindow, RectDelta};
 
 use crate::{
@@ -89,19 +91,20 @@ pub fn manage_window(
     // window afterwards, since the tree rebuild shifts the focus
     // chain back to the center.
     if is_tiling {
-      // Tell `apply_grid` to place the new window in the same
-      // column as the previously focused tiling window.
-      // Exclude the new window itself — it was already made
-      // focus descendant at line 46 above.
-      let new_id = window_container.id();
-      let affinity = workspace
-        .descendant_focus_order()
-        .find_map(|c| match c {
-          Container::TilingWindow(w) if w.id() != new_id => {
-            Some(w.id())
-          }
+      // Affinity only applies in grid mode: place the new window in the
+      // same column as the previously focused tiling window. Exclude the
+      // new window itself — it was already made focus descendant above.
+      // In master-stack modes no affinity applies; clearing it prevents a
+      // stale target from reordering the grid on the next toggle into it.
+      let affinity = if workspace.columns_mode() == ColumnsMode::Grid {
+        let new_id = window_container.id();
+        workspace.descendant_focus_order().find_map(|c| match c {
+          Container::TilingWindow(w) if w.id() != new_id => Some(w.id()),
           _ => None,
-        });
+        })
+      } else {
+        None
+      };
       workspace.set_grid_affinity(affinity);
 
       workspace.push_window_order(window_container.id());
