@@ -92,7 +92,13 @@ fn main() -> anyhow::Result<()> {
     event_loop.run()?;
 
     // Wait for clean exit of the WM.
-    task_handle.join().unwrap()
+    match task_handle.join() {
+      Ok(result) => result,
+      // The WM thread panicked. The panic hook installed in
+      // `setup_logging` has already written the message, location, and
+      // backtrace to `errors.log`.
+      Err(_) => anyhow::bail!("Window manager thread panicked."),
+    }
   } else {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(wm_cli::start(args))
@@ -218,7 +224,9 @@ async fn start_wm(
         if wm.state.is_paused {
           Ok(())
         } else {
-          wm.state.cleanup_invalid_windows()
+          wm.state
+            .cleanup_invalid_windows()
+            .and_then(|()| wm.discover_windows(&mut config))
         }
       },
       Some((
@@ -322,6 +330,35 @@ fn setup_logging(verbosity: &Verbosity) -> anyhow::Result<()> {
     );
 
   tracing::subscriber::set_global_default(subscriber)?;
+
+  // Route panics through `tracing` so they land in `errors.log`. Rust's
+  // default panic hook writes to stderr, which is discarded in release
+  // builds (the `windows` subsystem has no attached console), leaving
+  // crashes with no trace. Capturing the message, location, and a forced
+  // backtrace here ensures the next crash is diagnosable.
+  let default_hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    let backtrace = std::backtrace::Backtrace::force_capture();
+
+    let location = info.location().map_or_else(
+      || "unknown location".to_string(),
+      |loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()),
+    );
+
+    let message = info
+      .payload()
+      .downcast_ref::<&str>()
+      .map(|s| (*s).to_string())
+      .or_else(|| info.payload().downcast_ref::<String>().cloned())
+      .unwrap_or_else(|| "<non-string panic payload>".to_string());
+
+    tracing::error!(
+      "Panic at {location}: {message}\nBacktrace:\n{backtrace}"
+    );
+
+    // Preserve default behavior (e.g. stderr output in dev builds).
+    default_hook(info);
+  }));
 
   tracing::info!(
     "Starting WM with log level {:?}.",

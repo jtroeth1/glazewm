@@ -161,7 +161,7 @@ fn check_is_manageable(
         native_window.has_window_style_ex(WS_EX_TOOLWINDOW);
 
       if is_child || is_no_activate || is_tool_window {
-        tracing::info!(
+        tracing::debug!(
           "Skipping window '{}' [{}]: child={is_child}, \
            no_activate={is_no_activate}, tool_window={is_tool_window}",
           native_properties.title,
@@ -178,7 +178,7 @@ fn check_is_manageable(
       if native_window.has_owner_window()
         && !native_window.has_window_style(WS_CAPTION)
       {
-        tracing::info!(
+        tracing::debug!(
           "Skipping window '{}' [{}]: owner window without caption.",
           native_properties.title,
           native_properties.process_name,

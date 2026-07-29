@@ -26,7 +26,8 @@ use crate::{
     },
     monitor::focus_monitor,
     window::{
-      ignore_window, move_window_in_direction, move_window_to_workspace,
+      ignore_window, manage_window, move_window_in_direction,
+      move_window_to_workspace,
       resize_window, set_window_position, set_window_size,
       update_window_state, WindowPositionTarget,
     },
@@ -144,6 +145,40 @@ impl WindowManager {
         }
       },
     }?;
+
+    if !state.is_paused && state.pending_sync.has_changes() {
+      platform_sync(state, config)?;
+    }
+
+    Ok(())
+  }
+
+  /// Discovers currently visible, manageable windows that aren't yet
+  /// managed and manages them.
+  ///
+  /// This self-heals a startup race: a window that is transiently cloaked
+  /// (`DWMWA_CLOAKED`) while launching, or shown before the window
+  /// listener is registered, is skipped by `populate` and never receives
+  /// a `Shown` event afterwards. Without this it stays unmanaged until the
+  /// user closes and reopens it. Runs periodically from the event loop.
+  pub fn discover_windows(
+    &mut self,
+    config: &mut UserConfig,
+  ) -> anyhow::Result<()> {
+    let state = &mut self.state;
+
+    for native_window in state.dispatcher.visible_windows()? {
+      // Skip windows that are already managed or explicitly ignored.
+      if state.window_from_native(&native_window).is_some()
+        || state.ignored_windows.contains(&native_window)
+      {
+        continue;
+      }
+
+      if let Err(err) = manage_window(native_window, None, state, config) {
+        warn!("Failed to manage discovered window: {err:#}");
+      }
+    }
 
     if !state.is_paused && state.pending_sync.has_changes() {
       platform_sync(state, config)?;

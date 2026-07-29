@@ -3,6 +3,12 @@ resolver = "2"
 members = ["packages/*"]
 default-members = ["packages/wm", "packages/wm-cli"]
 
+# Emit line-table debug info in release so panic backtraces (captured by
+# the panic hook in `wm`) carry `file:line` locations. Minimal size cost,
+# no runtime overhead.
+[profile.release]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive"] }
