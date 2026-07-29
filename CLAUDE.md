@@ -24,13 +24,13 @@ Cross-compile target: `x86_64-pc-windows-gnu` (MinGW). Cannot run tests natively
 # Build
 cargo build --release --target x86_64-pc-windows-gnu
 
-# Deploy — ALWAYS use this exact path and filename
+# Deploy — stage for auto-update on next GlazeWM restart
 cp target/x86_64-pc-windows-gnu/release/glazewm.exe /mnt/c/Users/jtroeth/.glzr/glazewm/glazewm-new.exe
 ```
 
 - The binary must be copied as `glazewm-new.exe` — never rename it.
-- If the binary is locked (GlazeWM running), copy to a staging name and have the user swap after stopping GlazeWM.
-- GlazeWM must run **elevated** (Task Scheduler or admin PowerShell) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls.
+- **Auto-update pipeline**: Task Scheduler runs `start-glazewm.ps1` (elevated). On launch it checks for `glazewm-new.exe`, backs up the current `glazewm-jt.exe` → `glazewm-jt-bak.exe` in `C:\Program Files\glzr.io\GlazeWM\`, promotes the staged build, removes the staging file, then launches GlazeWM. User just restarts GlazeWM to pick up the new binary.
+- GlazeWM must run **elevated** (Task Scheduler) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls.
 - Linker configured in `.cargo/config.toml`: `x86_64-w64-mingw32-gcc`.
 
 ## Code Style
@@ -81,7 +81,7 @@ Comma-separated tokens, left-to-right: `C` = center column (exactly one), `*` = 
 - `MasterStackRight`: Same but spec reversed (`C,*` → `*,C`).
 - `Grid`: Round-robin into equal columns. Requires ≥4 windows; "armed" with fewer (mode stays Grid, layout falls back to master-stack-left, auto-applies when 4th window arrives).
 
-Toggle cycle via `Alt+G`: Left → Right → Grid → Left.
+Toggle cycle via `Alt+G`: Left → Grid → Right → Left.
 
 ### Window Order Buffer
 - `window_order[0]` is always the center window. No special tracking needed.
@@ -127,7 +127,10 @@ Custom Zebar widget pack at `/mnt/c/Users/jtroeth/.glzr/zebar/custom-bar/`.
 ## Config Locations (Windows)
 
 - GlazeWM config: `C:\Users\jtroeth\.glzr\glazewm\config.yaml`
-- GlazeWM binary: `C:\Users\jtroeth\.glzr\glazewm\glazewm-new.exe`
+- GlazeWM launcher: `C:\Users\jtroeth\.glzr\glazewm\start-glazewm.ps1`
+- GlazeWM staging: `C:\Users\jtroeth\.glzr\glazewm\glazewm-new.exe` (consumed on next launch)
+- GlazeWM binary: `C:\Program Files\glzr.io\GlazeWM\glazewm-jt.exe`
+- GlazeWM backup: `C:\Program Files\glzr.io\GlazeWM\glazewm-jt-bak.exe`
 - GlazeWM logs: `C:\Users\jtroeth\.glzr\glazewm\errors.log` (ERROR only), stdout for INFO+
 - Zebar config: `C:\Users\jtroeth\.glzr\zebar\custom-bar\`
 - Zebar settings: `C:\Users\jtroeth\.glzr\zebar\settings.json`
