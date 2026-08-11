@@ -24,12 +24,19 @@ Cross-compile target: `x86_64-pc-windows-gnu` (MinGW). Cannot run tests natively
 # Build
 cargo build --release --target x86_64-pc-windows-gnu
 
-# Deploy — stage for auto-update on next GlazeWM restart
-cp target/x86_64-pc-windows-gnu/release/glazewm.exe /mnt/c/Users/jtroeth/.glzr/glazewm/glazewm-new.exe
+# Deploy: exit GlazeWM first (the running image is locked), then promote.
+cp "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt.exe" \
+   "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt-bak.exe"
+cp target/x86_64-pc-windows-gnu/release/glazewm.exe \
+   "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt.exe"
+
+# Relaunch elevated.
+powershell.exe -NoProfile -Command "schtasks /run /tn 'StartGlazeZsolt'"
 ```
 
-- The binary must be copied as `glazewm-new.exe` — never rename it.
-- **Auto-update pipeline**: Task Scheduler runs `start-glazewm.ps1` (elevated). On launch it checks for `glazewm-new.exe`, backs up the current `glazewm-jt.exe` → `glazewm-jt-bak.exe` in `C:\Program Files\glzr.io\GlazeWM\`, promotes the staged build, removes the staging file, then launches GlazeWM. User just restarts GlazeWM to pick up the new binary.
+- WSL can write to `C:\Program Files\glzr.io\GlazeWM\` directly — no elevation needed for the copy. But the running `.exe` is locked by Windows, so **GlazeWM must be exited before promoting**.
+- The scheduled task that actually runs GlazeWM is `StartGlazeZsolt`, and its action is `glazewm-jt.exe` **directly** — it does *not* invoke `start-glazewm.ps1`. So the staging/auto-update path below is currently **inert**; staging `glazewm-new.exe` alone will not update anything.
+- **Staging path (only works if the task is repointed at the script)**: `cp …/release/glazewm.exe /mnt/c/Users/jtroeth/.glzr/glazewm/glazewm-new.exe`. The binary must be named `glazewm-new.exe`. On launch `start-glazewm.ps1` backs up `glazewm-jt.exe` → `glazewm-jt-bak.exe`, promotes the staged build, removes the staging file, then launches. To enable it, change the task action to `powershell.exe -NoProfile -File "%USERPROFILE%\.glzr\glazewm\start-glazewm.ps1"`.
 - GlazeWM must run **elevated** (Task Scheduler) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls.
 - Linker configured in `.cargo/config.toml`: `x86_64-w64-mingw32-gcc`.
 
