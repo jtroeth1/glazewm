@@ -33,15 +33,20 @@ struct WorkspaceInner {
   config: WorkspaceConfig,
   gaps_config: GapsConfig,
   tiling_direction: TilingDirection,
-  /// Stable creation-order list of tiling window IDs. The single source
-  /// of truth for window ordering in column layouts: `[0]` occupies the
-  /// `C` column in master-stack mode, `[1..]` fill the `*` columns.
-  window_order: Vec<Uuid>,
-  /// When set, the next `apply_grid` call places the newest window
-  /// in the same column as this window ID, then clears the field.
-  /// Set by `manage_window` so a freshly opened window lands
-  /// visually adjacent to the previously focused window.
-  grid_affinity: Option<Uuid>,
+  /// The window explicitly designated as this workspace's master — the
+  /// occupant of the `C` column in master-stack mode.
+  ///
+  /// Never inferred from focus, z-order or recency. It is set when the
+  /// workspace gains its first tiling window, changed only by the
+  /// commands that deliberately move a window into the center
+  /// (`center`, `rotate`, directional move), and re-resolved to the
+  /// first window in on-screen order when the designated master is no
+  /// longer on the workspace.
+  ///
+  /// Window *ordering* is deliberately not stored: it is read from the
+  /// container tree, which is the only thing that can't drift out of
+  /// sync with what is actually on screen.
+  master_window: Option<Uuid>,
   /// Current column layout mode for this workspace.
   columns_mode: ColumnsMode,
 }
@@ -60,8 +65,7 @@ impl Workspace {
       config,
       gaps_config,
       tiling_direction,
-      window_order: Vec::new(),
-      grid_affinity: None,
+      master_window: None,
       columns_mode: ColumnsMode::default(),
     };
 
@@ -78,27 +82,17 @@ impl Workspace {
     self.0.borrow_mut().config = config;
   }
 
-  /// Stable creation-order list of tiling window IDs.
-  pub fn window_order(&self) -> Vec<Uuid> {
-    self.0.borrow().window_order.clone()
+  /// The window designated as this workspace's master, if any.
+  ///
+  /// May name a window that has since left the workspace; callers must
+  /// validate it against the workspace's live tiling windows.
+  pub fn master_window(&self) -> Option<Uuid> {
+    self.0.borrow().master_window
   }
 
-  /// Append a tiling window ID to the creation-order buffer.
-  pub fn push_window_order(&self, id: Uuid) {
-    self.0.borrow_mut().window_order.push(id);
-  }
-
-  /// Remove a tiling window ID from the creation-order buffer.
-  pub fn remove_from_window_order(&self, id: Uuid) {
-    self.0.borrow_mut().window_order.retain(|&x| x != id);
-  }
-
-  /// Swap two positions in the window order buffer.
-  pub fn swap_window_order(&self, a: usize, b: usize) {
-    let mut inner = self.0.borrow_mut();
-    if a < inner.window_order.len() && b < inner.window_order.len() {
-      inner.window_order.swap(a, b);
-    }
+  /// Designates `id` as this workspace's master window.
+  pub fn set_master_window(&self, id: Option<Uuid>) {
+    self.0.borrow_mut().master_window = id;
   }
 
   /// Current column layout mode for this workspace.
@@ -109,17 +103,6 @@ impl Workspace {
   /// Set the column layout mode.
   pub fn set_columns_mode(&self, mode: ColumnsMode) {
     self.0.borrow_mut().columns_mode = mode;
-  }
-
-  /// Set the grid affinity target so the next `apply_grid` places
-  /// the newest window in this window's column.
-  pub fn set_grid_affinity(&self, id: Option<Uuid>) {
-    self.0.borrow_mut().grid_affinity = id;
-  }
-
-  /// Consume the grid affinity target (read and clear).
-  pub fn take_grid_affinity(&self) -> Option<Uuid> {
-    self.0.borrow_mut().grid_affinity.take()
   }
 
   /// Whether the workspace is currently displayed by the parent monitor.

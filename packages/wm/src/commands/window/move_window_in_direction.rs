@@ -256,8 +256,11 @@ pub(crate) fn move_to_workspace_in_direction(
     let is_tiling = window_to_move.is_tiling_window();
     let moved_window_id = window_to_move.id();
 
-    // Remove from source workspace's window order before the move.
-    workspace.remove_from_window_order(moved_window_id);
+    // The window is leaving: give up the master designation so the source
+    // workspace promotes a survivor instead of holding a dangling id.
+    if workspace.master_window() == Some(moved_window_id) {
+      workspace.set_master_window(None);
+    }
 
     // Focus should be reassigned within the original workspace after the
     // window is moved out. For example, if the focus order is 1. tiling
@@ -271,9 +274,6 @@ pub(crate) fn move_to_workspace_in_direction(
       target_index,
       state,
     )?;
-
-    // Add to target workspace's window order after the move.
-    target_workspace.push_window_order(moved_window_id);
 
     if let Some(focus_target) = focus_target {
       set_focused_descendant(
@@ -290,11 +290,14 @@ pub(crate) fn move_to_workspace_in_direction(
       .queue_cursor_jump()
       .queue_workspace_to_reorder(target_workspace.clone());
 
-    // Reapply assigned columns now the window has changed workspaces.
+    // Reapply assigned columns now the window has changed workspaces. The
+    // moved window takes the last slot on the target, so nothing already
+    // there changes column.
     if is_tiling {
       reapply_columns_after_move(
         &workspace,
         &target_workspace,
+        moved_window_id,
         state,
         config,
       )?;

@@ -12,6 +12,7 @@ use wm_platform::{
 use wm_platform::{NativeWindowWindowsExt, OpacityValue};
 
 use crate::{
+  cloak_journal::CloakJournal,
   commands::{
     container::set_focused_descendant,
     general::platform_sync,
@@ -79,6 +80,10 @@ pub struct WmState {
   /// Whether the initial state has been populated.
   has_initialized: bool,
 
+  /// Journal of the currently managed windows, used by a later instance
+  /// to uncloak windows if this one dies without cleaning up.
+  cloak_journal: CloakJournal,
+
   /// Sender for emitting WM-related events.
   event_tx: mpsc::UnboundedSender<WmEvent>,
 
@@ -105,6 +110,7 @@ impl WmState {
       is_paused: false,
       is_focus_synced: false,
       has_initialized: false,
+      cloak_journal: CloakJournal::new(),
       event_tx,
       exit_tx,
     }
@@ -116,6 +122,11 @@ impl WmState {
     &mut self,
     config: &mut UserConfig,
   ) -> anyhow::Result<()> {
+    // Uncloak windows left cloaked by a previous instance that died
+    // without cleaning up. Must run before `visible_windows`, since a
+    // cloaked window is invisible to that enumeration.
+    CloakJournal::recover();
+
     // Get the originally focused window when the WM was started.
     let focused_window = self.dispatcher.focused_window().ok();
 
@@ -153,8 +164,16 @@ impl WmState {
         ) {
           tracing::warn!("Failed to manage window at startup: {err:#}");
         }
+      } else {
+        tracing::warn!(
+          "Skipping window at startup, no displayed workspace found for \
+           it: {}",
+          describe_window(&native_window)
+        );
       }
     }
+
+    self.journal_managed_windows();
 
     let container_to_focus = focused_window
       .and_then(|focused_window| {
@@ -693,7 +712,37 @@ impl WmState {
     // Prune ignored windows that are no longer valid.
     self.ignored_windows.retain(NativeWindow::is_valid);
 
+    // Refresh the cloak journal so a hard kill leaves an accurate set of
+    // handles behind for the next instance to uncloak.
+    self.journal_managed_windows();
+
     Ok(())
+  }
+
+  /// Records the currently managed windows in the cloak journal.
+  ///
+  /// Lets a later instance uncloak these windows if this one dies
+  /// without running its cleanup (e.g. a hard kill of both the WM and
+  /// the watcher). Called from `populate` and on the periodic
+  /// `cleanup_invalid_windows` tick, so the journal is at most one tick
+  /// stale.
+  pub fn journal_managed_windows(&mut self) {
+    let entries = self
+      .windows()
+      .iter()
+      .filter_map(|window| {
+        let native = window.native();
+        // A no-op on Windows, where `WindowId` already wraps an `isize`,
+        // and widening on macOS, where it wraps a `u32`.
+        #[allow(clippy::useless_conversion)]
+        let handle = isize::try_from(native.id().0).ok()?;
+        let process_name = native.process_name().ok()?;
+
+        Some((handle, process_name))
+      })
+      .collect();
+
+    self.cloak_journal.record(entries);
   }
 }
 
@@ -713,6 +762,13 @@ impl Drop for WmState {
       // Reset any effects on Windows.
       #[cfg(target_os = "windows")]
       {
+        // Uncloak before showing: `show` (`SW_SHOWNA`) cannot reveal a
+        // cloaked window, so a window parked on a non-displayed
+        // workspace would stay invisible after exit.
+        if let Err(err) = window.native().set_cloaked(false) {
+          warn!("Failed to uncloak window on cleanup: {:?}", err);
+        }
+
         if let Err(err) = window.native().show() {
           warn!("Failed to show window: {:?}", err);
         }
@@ -724,5 +780,18 @@ impl Drop for WmState {
           .set_transparency(&OpacityValue::from_alpha(u8::MAX));
       }
     }
+  }
+}
+
+/// Describes a window for logging, falling back to its handle when its
+/// title and process name cannot be read.
+fn describe_window(native_window: &NativeWindow) -> String {
+  match (native_window.title(), native_window.process_name()) {
+    (Ok(title), Ok(process_name)) => {
+      format!("'{title}' [{process_name}]")
+    }
+    (_, Ok(process_name)) => format!("[{process_name}]"),
+    (Ok(title), _) => format!("'{title}'"),
+    _ => format!("handle {:?}", native_window.id()),
   }
 }

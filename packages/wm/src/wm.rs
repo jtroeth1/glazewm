@@ -27,9 +27,8 @@ use crate::{
     monitor::focus_monitor,
     window::{
       ignore_window, manage_window, move_window_in_direction,
-      move_window_to_workspace,
-      resize_window, set_window_position, set_window_size,
-      update_window_state, WindowPositionTarget,
+      move_window_to_workspace, resize_window, set_window_position,
+      set_window_size, update_window_state, WindowPositionTarget,
     },
     workspace::{
       apply_center, apply_columns, apply_rotate, assign_columns,
@@ -175,7 +174,22 @@ impl WindowManager {
         continue;
       }
 
-      if let Err(err) = manage_window(native_window, None, state, config) {
+      // Place the window on its own monitor's displayed workspace, the
+      // same way `populate` does. Passing `None` would attach it next to
+      // the currently focused container instead.
+      let target_parent = state
+        .nearest_monitor(&native_window)
+        .and_then(|monitor| monitor.displayed_workspace())
+        .map(Into::into);
+
+      tracing::info!(
+        "Managing newly discovered window: {:?}",
+        native_window.id()
+      );
+
+      if let Err(err) =
+        manage_window(native_window, target_parent, state, config)
+      {
         warn!("Failed to manage discovered window: {err:#}");
       }
     }
@@ -302,7 +316,12 @@ impl WindowManager {
       }
       InvokeCommand::Focus(args) => {
         if let Some(direction) = &args.direction {
-          focus_in_direction(&subject_container, direction, state, config)?;
+          focus_in_direction(
+            &subject_container,
+            direction,
+            state,
+            config,
+          )?;
         }
 
         if let Some(direction) = &args.workspace_in_direction {
@@ -391,7 +410,6 @@ impl WindowManager {
             &workspace,
             args.spec_or_default(),
             args.center_or_default(),
-            &args.bias_or_default(),
             state,
             config,
           )
@@ -405,7 +423,6 @@ impl WindowManager {
           &workspace,
           args.spec_or_default(),
           args.center_or_default(),
-          &args.bias_or_default(),
           state,
           config,
         )
@@ -900,6 +917,18 @@ impl WindowManager {
     config: &mut UserConfig,
     ipc_server: &mut IpcServer,
   ) {
+    // Uncloak every managed window. This is the deterministic exit path;
+    // `WmState::drop` repeats it as a backstop. A cloaked window cannot
+    // be revealed by `show` alone, and the cloak survives this process,
+    // so skipping this would hide the window from the next instance's
+    // `visible_windows` enumeration forever.
+    #[cfg(target_os = "windows")]
+    for window in self.state.windows() {
+      if let Err(err) = window.native().set_cloaked(false) {
+        warn!("Failed to uncloak window on exit: {:?}", err);
+      }
+    }
+
     self.state.emit_event(WmEvent::ApplicationExiting);
 
     // Ensure that the WM is unpaused, otherwise, shutdown commands won't

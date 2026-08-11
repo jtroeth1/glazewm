@@ -4,7 +4,7 @@ use wm_platform::{
   RectDelta,
 };
 
-use crate::app_command::{ColumnBias, InvokeCommand};
+use crate::app_command::InvokeCommand;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all(serialize = "camelCase"))]
@@ -395,8 +395,7 @@ pub struct WorkspaceConfig {
 
   /// A column layout assigned to this workspace, applied whenever the
   /// workspace is focused. Accepts either a bare spec string
-  /// (`columns: "*,C,*"`) or a full object (`columns: { spec, center,
-  /// bias }`).
+  /// (`columns: "*,C,*"`) or a full object (`columns: { spec, center }`).
   #[serde(default)]
   pub columns: Option<ColumnLayout>,
 }
@@ -405,13 +404,12 @@ pub struct WorkspaceConfig {
 /// reapplied on every switch back to the workspace.
 ///
 /// Deserializes from either a bare spec string (`"*,C,*"`) or a full
-/// object (`{ spec: "*,C,*", center: 0.6, bias: left }`).
+/// object (`{ spec: "*,C,*", center: 0.6 }`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all(serialize = "camelCase"))]
 pub struct ColumnLayout {
   pub spec: String,
   pub center: f32,
-  pub bias: ColumnBias,
 }
 
 /// Helper function for the default center width of a column layout.
@@ -432,8 +430,6 @@ impl<'de> Deserialize<'de> for ColumnLayout {
         spec: String,
         #[serde(default = "default_columns_center")]
         center: f32,
-        #[serde(default)]
-        bias: ColumnBias,
       },
     }
 
@@ -441,11 +437,8 @@ impl<'de> Deserialize<'de> for ColumnLayout {
       Raw::Spec(spec) => ColumnLayout {
         spec,
         center: default_columns_center(),
-        bias: ColumnBias::default(),
       },
-      Raw::Full { spec, center, bias } => {
-        ColumnLayout { spec, center, bias }
-      }
+      Raw::Full { spec, center } => ColumnLayout { spec, center },
     })
   }
 }
@@ -505,7 +498,7 @@ impl<'de> Deserialize<'de> for DefaultColumns {
   where
     D: Deserializer<'de>,
   {
-    /// A rule as written in config, with the spec/center/bias flattened
+    /// A rule as written in config, with the spec/center flattened
     /// alongside the aspect-ratio bounds.
     #[derive(Deserialize)]
     struct RawRule {
@@ -516,8 +509,6 @@ impl<'de> Deserialize<'de> for DefaultColumns {
       spec: String,
       #[serde(default = "default_columns_center")]
       center: f32,
-      #[serde(default)]
-      bias: ColumnBias,
     }
 
     #[derive(Deserialize)]
@@ -564,7 +555,6 @@ impl<'de> Deserialize<'de> for DefaultColumns {
         Some(ColumnLayout {
           spec: raw.spec,
           center: raw.center,
-          bias: raw.bias,
         })
       };
 
@@ -581,7 +571,6 @@ impl<'de> Deserialize<'de> for DefaultColumns {
         max_aspect_ratio: None,
         spec,
         center: default_columns_center(),
-        bias: ColumnBias::default(),
       }],
       Raw::Single(rule) => vec![rule],
       Raw::Rules(rules) => rules,
@@ -684,7 +673,7 @@ where
 
 #[cfg(test)]
 mod tests {
-  use super::{ColumnBias, DefaultColumns};
+  use super::DefaultColumns;
 
   fn parse(yaml: &str) -> DefaultColumns {
     serde_yaml::from_str(yaml).expect("valid default_columns")
@@ -700,18 +689,17 @@ mod tests {
     assert_eq!(rule.max_aspect_ratio, None);
     let assignment = rule.columns.as_ref().expect("columns");
     assert_eq!(assignment.spec, "*,C,*");
-    assert_eq!(assignment.bias, ColumnBias::Left);
+    assert!((assignment.center - 0.6).abs() < f32::EPSILON);
   }
 
   #[test]
   fn deserializes_single_object() {
-    let parsed = parse("{ spec: \"C,*\", center: 0.5, bias: right }");
+    let parsed = parse("{ spec: \"C,*\", center: 0.5 }");
 
     assert_eq!(parsed.rules.len(), 1);
     let assignment = parsed.rules[0].columns.as_ref().expect("columns");
     assert_eq!(assignment.spec, "C,*");
     assert!((assignment.center - 0.5).abs() < f32::EPSILON);
-    assert_eq!(assignment.bias, ColumnBias::Right);
   }
 
   #[test]

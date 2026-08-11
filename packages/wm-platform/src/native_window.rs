@@ -245,6 +245,13 @@ pub trait NativeWindowWindowsExt {
   /// This method is only available on Windows.
   fn set_cloaked(&self, cloaked: bool) -> crate::Result<()>;
 
+  /// Whether the window is currently cloaked (`DWMWA_CLOAKED`).
+  ///
+  /// # Platform-specific
+  ///
+  /// This method is only available on Windows.
+  fn is_cloaked(&self) -> crate::Result<bool>;
+
   /// Marks the window as fullscreen.
   ///
   /// Causes the native Windows taskbar to be moved to the bottom of the
@@ -382,6 +389,10 @@ impl NativeWindowWindowsExt for NativeWindow {
 
   fn set_cloaked(&self, cloaked: bool) -> crate::Result<()> {
     self.inner.set_cloaked(cloaked)
+  }
+
+  fn is_cloaked(&self) -> crate::Result<bool> {
+    self.inner.is_cloaked()
   }
 
   fn mark_fullscreen(&self, fullscreen: bool) -> crate::Result<()> {

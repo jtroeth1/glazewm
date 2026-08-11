@@ -13,11 +13,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use wm_common::{
   AppCommand, AppMetadataData, BindingModesData, ClientResponseData,
-  ClientResponseMessage, ColumnsModeData, CommandData,
-  EventSubscribeData, EventSubscriptionMessage, FocusedData,
-  MonitorsData, QueryCommand, ServerMessage, SubscribableEvent,
-  TilingDirectionData, WindowsData, WmEvent, WorkspacesData,
-  DEFAULT_IPC_PORT,
+  ClientResponseMessage, ColumnsModeData, CommandData, EventSubscribeData,
+  EventSubscriptionMessage, FocusedData, MonitorsData, QueryCommand,
+  ServerMessage, SubscribableEvent, TilingDirectionData, WindowsData,
+  WmEvent, WorkspacesData, DEFAULT_IPC_PORT,
 };
 
 use crate::{

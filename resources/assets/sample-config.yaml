@@ -48,24 +48,24 @@ general:
   # matching no rule keeps the normal tiling layout.
   #
   # Each column `spec` is a comma-separated, left-to-right list: a number
-  # is a fixed stack of that many windows, `*` shares the leftover windows
-  # evenly, and `C` is the wide center (the focused window; exactly one).
-  # E.g. `*,C,*`, `C,*`, or `2,C,*`. Bounds are `min_aspect_ratio`
-  # (inclusive) and `max_aspect_ratio` (exclusive); a `spec` of `default`
-  # (or `none`) explicitly keeps normal tiling. Each rule may also set
-  # `center` (center width as a fraction of the workspace, default 0.6;
-  # the rest is split evenly across the other columns) and `bias` (which
-  # side wins an uneven `*` split, 'left'/'right', default 'left').
+  # is a fixed stack of that many windows, `*` takes a share of the
+  # leftover windows, and `C` is the wide center (the master window;
+  # exactly one). E.g. `*,C,*`, `C,*`, or `2,C,*`. Windows are dealt into
+  # the non-center columns row by row, left to right, so opening or
+  # closing one never shuffles the others between columns. Bounds are
+  # `min_aspect_ratio` (inclusive) and `max_aspect_ratio` (exclusive); a
+  # `spec` of `default` (or `none`) explicitly keeps normal tiling. Each
+  # rule may also set `center` (center width as a fraction of the
+  # workspace, default 0.6; the rest is split evenly across the other
+  # columns).
   # default_columns:
   #   # Ultrawide (~21:9 and wider): center flanked by two stacks.
   #   - min_aspect_ratio: 2.1
   #     spec: '*,C,*'
   #     center: 0.5
-  #     bias: 'left'
   #   # Standard widescreen (~16:9): center with a single side stack.
   #   - min_aspect_ratio: 1.5
   #     spec: 'C,*'
-  #     bias: 'right'
   #   # Anything narrower: normal tiling.
   #   - spec: default
 
@@ -158,7 +158,6 @@ workspaces:
     # columns:
     #   spec: '*,C,*'    # See `general.default_columns` for the spec grammar.
     #   center: 0.6      # Center-column width, a fraction of the workspace.
-    #   bias: 'left'     # Which side wins an uneven `*` split ('left'/'right').
   - name: '2'
   - name: '3'
   - name: '4'

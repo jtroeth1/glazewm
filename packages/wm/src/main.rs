@@ -34,6 +34,7 @@ use crate::{
   wm::WindowManager,
 };
 
+mod cloak_journal;
 mod commands;
 mod events;
 mod ipc_server;

@@ -4,9 +4,7 @@ use wm_platform::NativeWindow;
 
 use crate::{
   commands::{
-    container::set_focused_descendant,
-    window::unmanage_window,
-    workspace::reapply_assigned_columns,
+    window::unmanage_window, workspace::reapply_assigned_columns,
   },
   traits::{CommonGetters, WindowGetters},
   user_config::UserConfig,
@@ -40,27 +38,22 @@ pub fn handle_window_hidden(
     {
       let workspace = window.workspace();
 
-      // Remove from the LIFO order buffer before unmanaging.
+      // Give up the master designation before unmanaging, so the layout
+      // promotes the first remaining window in on-screen order instead of
+      // holding a dangling id.
       if let Some(ws) = workspace.as_ref() {
-        ws.remove_from_window_order(window.id());
+        if ws.master_window() == Some(window.id()) {
+          ws.set_master_window(None);
+        }
       }
 
       unmanage_window(window, state)?;
 
       // Re-tidy the workspace's columns (if any) now a window's gone.
+      // `unmanage_window` has already moved focus to the most recently
+      // focused survivor and the columns render preserves it.
       if let Some(workspace) = workspace {
         reapply_assigned_columns(&workspace, state, config)?;
-
-        // Focus the last window in the LIFO order buffer.
-        let focus_target = workspace
-          .window_order()
-          .last()
-          .and_then(|id| state.container_by_id(*id))
-          .or_else(|| state.focused_container());
-        if let Some(target) = focus_target {
-          set_focused_descendant(&target, None);
-          state.pending_sync.queue_focus_change();
-        }
       }
     }
   }

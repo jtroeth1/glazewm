@@ -364,17 +364,6 @@ pub struct InvokeFocusCommand {
 )]
 #[clap(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
-pub enum ColumnBias {
-  #[default]
-  Left,
-  Right,
-}
-
-#[derive(
-  Clone, Debug, Default, Deserialize, PartialEq, Serialize, ValueEnum,
-)]
-#[clap(rename_all = "snake_case")]
-#[serde(rename_all = "snake_case")]
 pub enum ColumnsMode {
   /// Master-stack layout with center column on the left.
   #[default]
@@ -402,12 +391,6 @@ pub struct InvokeColumnsCommand {
   /// to `0.6`.
   #[clap(long, allow_hyphen_values = true)]
   pub center: Option<f32>,
-
-  /// Which side wins the odd leftover window when `*` columns can't
-  /// divide evenly (e.g. `*,C,*` with one window to place). Defaults to
-  /// `left`.
-  #[clap(long, value_enum)]
-  pub bias: Option<ColumnBias>,
 }
 
 impl InvokeColumnsCommand {
@@ -420,7 +403,7 @@ impl InvokeColumnsCommand {
   /// Whether no column parameters were supplied, i.e. a bare `columns`.
   #[must_use]
   pub fn is_unset(&self) -> bool {
-    self.spec.is_none() && self.center.is_none() && self.bias.is_none()
+    self.spec.is_none() && self.center.is_none()
   }
 
   /// The supplied column spec, or the default `*,C,*`.
@@ -433,12 +416,6 @@ impl InvokeColumnsCommand {
   #[must_use]
   pub fn center_or_default(&self) -> f32 {
     self.center.unwrap_or(Self::DEFAULT_CENTER)
-  }
-
-  /// The supplied bias, or the default (`left`).
-  #[must_use]
-  pub fn bias_or_default(&self) -> ColumnBias {
-    self.bias.clone().unwrap_or_default()
   }
 }
 

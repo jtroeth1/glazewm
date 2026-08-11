@@ -260,24 +260,28 @@ workspaces:
 
 ### Config: Columns
 
-Columns turn a workspace into a **centered-focus layout**: the focused window sits in a wide center column, with supporting windows tiled into columns on either side. The layout is declarative — you describe the shape once and GlazeWM keeps it applied as windows open, close, and move.
+Columns turn a workspace into a **centered-focus layout**: a designated **master** window sits in a wide center column, with supporting windows tiled into columns on either side. The layout is declarative — you describe the shape once and GlazeWM keeps it applied as windows open, close, and move.
 
 A column `spec` is a comma-separated, left-to-right list of columns. Each token is one column:
 
-- `C` — the wide **center** column, holding the focused window. Exactly one `C` is required.
+- `C` — the wide **center** column, holding the master window. Exactly one `C` is required.
 - a **number** (`1`, `2`, `3`, …) — a *fixed* stack holding exactly that many windows.
-- `*` — a *flexible* stack that shares out whatever windows the fixed columns don't take, split evenly across all `*` columns.
+- `*` — a *flexible* stack that takes a share of whatever windows the fixed columns don't hold.
 
-Columns fill left-to-right. Say you have six windows open (one focused, five others):
+Windows are dealt into the non-center columns **row by row, left to right**: the first side window goes to the top of the leftmost column, the second to the top of the next, and so on, wrapping to a second row once every column has one. A fixed column drops out of the deal once it holds its count. Say you have six windows open (one master, five others):
 
 | Spec | Columns | Result |
 | --- | --- | --- |
-| `*,C,*` | flexible \| **center** \| flexible | `3 \| C \| 2` — the five side windows split evenly; the odd one goes left (see `bias`). |
+| `*,C,*` | flexible \| **center** \| flexible | `3 \| C \| 2` — dealt alternately, so the left column takes the odd one. |
 | `2,C,*` | fixed 2 \| **center** \| flexible | `2 \| C \| 3` — the left column is capped at two, the right takes the rest. |
-| `C,*,*` | **center** \| flexible \| flexible | `C \| 3 \| 2` — center on the left, the other five split across two columns. |
+| `C,*,*` | **center** \| flexible \| flexible | `C \| 3 \| 2` — center on the left, the other five dealt across two columns. |
 | `C,2,*` | **center** \| fixed 2 \| flexible | `C \| 2 \| 3` — center, then a fixed pair, then everything else. |
 
 If the fixed columns can't hold every window and there's no `*` to absorb the rest, the extra windows stack onto the last column so none are dropped.
+
+Dealing row by row is what makes the layout **stable**: side window *n* always lands in the same column regardless of how many windows are open, so opening or closing one never shuffles the others between columns. It also makes reapplying a layout a genuine no-op, which is why the window ordering can be read straight back out of the layout instead of being tracked in a side buffer that could drift from what's on screen.
+
+**The master window.** The `C` column's occupant is tracked explicitly and is never guessed from focus, z-order, or column widths. It changes only when you ask for it — `center`, `rotate`, or a `move` into or out of the center column — or when the current master leaves the workspace, in which case the first window in on-screen order takes over.
 
 **Column widths.** `center` sets the center column's width as a fraction of the workspace (`0.1`–`0.9`, default `0.6`). The rest of the width is split **equally** among the other columns, no matter how many windows each one stacks — so `C,*,*` at `center: 0.6` gives a 60% center and two 20% columns, while `2,C,*` gives a 60% center with 20% columns either side. Within a column, the stacked windows share its height evenly.
 
@@ -294,7 +298,6 @@ workspaces:
     columns:
       spec: "C,2,*"    # Center, a fixed pair, then the rest.
       center: 0.6      # Center width as a fraction of the workspace (default 0.6).
-      bias: "left"     # Which side wins an uneven `*` split (default "left").
 ```
 
 **Default by monitor shape.** `general.default_columns` applies a layout to any workspace without its own `columns`, chosen from the aspect ratio (`width / height`) of the monitor the workspace occupies. Rules are checked in order and the first matching band wins, so a workspace moved to a differently-shaped monitor re-columns automatically. A monitor matching no rule keeps the normal tiling layout.
@@ -309,7 +312,6 @@ general:
     # Standard widescreen (~16:9): center with a single side stack.
     - min_aspect_ratio: 1.5
       spec: "C,*"
-      bias: "right"
     # Anything narrower: normal tiling.
     - spec: default
 ```
@@ -318,10 +320,10 @@ general:
 
 | Command | Description |
 | --- | --- |
-| `columns [<spec>] [--center <fraction>] [--bias left\|right]` | Apply a one-shot layout to the focused workspace. Bare `columns` re-asserts the assigned layout; with no assignment it defaults to `*,C,*`. |
-| `assign-columns [<spec>] [--center <fraction>] [--bias left\|right]` | Assign a persistent layout to the focused workspace (equivalent to setting `columns` in the config). |
+| `columns [<spec>] [--center <fraction>]` | Apply a one-shot layout to the focused workspace. Bare `columns` re-asserts the assigned layout; with no assignment it defaults to `*,C,*`. |
+| `assign-columns [<spec>] [--center <fraction>]` | Assign a persistent layout to the focused workspace (equivalent to setting `columns` in the config). |
 | `unassign-columns` | Clear the workspace's assigned layout and return to normal tiling. |
-| `center` | Swap the focused window into the center column. Running it again swaps the previous center back. |
+| `center` | Swap the focused window into the center column, making it the master. Running it again swaps the previous master back. |
 | `rotate [--ccw]` | Rotate windows through the columns by one slot, preserving the layout shape. `--ccw` rotates counter-clockwise. |
 
 Within a columns layout, `move` in a direction is grid-aware — it shifts the focused window between columns and stacks rather than breaking the layout.

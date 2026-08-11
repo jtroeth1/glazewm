@@ -1,15 +1,13 @@
 use anyhow::Context;
 use tracing::info;
-use wm_common::{
-  try_warn, ColumnsMode, WindowRuleEvent, WindowState, WmEvent,
-};
+use wm_common::{try_warn, WindowRuleEvent, WindowState, WmEvent};
 use wm_platform::{NativeWindow, RectDelta};
 
 use crate::{
   commands::{
     container::{attach_container, set_focused_descendant},
     window::run_window_rules,
-    workspace::reapply_assigned_columns,
+    workspace::reapply_columns_for_new_window,
   },
   models::{
     Container, Monitor, NativeWindowProperties, NonTilingWindow,
@@ -26,12 +24,20 @@ pub fn manage_window(
   state: &mut WmState,
   config: &mut UserConfig,
 ) -> anyhow::Result<()> {
-  let Some(native_properties) =
-    check_is_manageable(&native_window).unwrap_or(None)
-  else {
-    return Ok(());
-  };
+  let native_properties = match check_is_manageable(&native_window) {
+    Ok(Some(native_properties)) => native_properties,
+    Ok(None) => return Ok(()),
+    Err(err) => {
+      // An unreadable window (destroyed mid-check, access denied, etc.)
+      // must not abort startup, but it must not vanish silently either.
+      tracing::warn!(
+        "Failed to check if window {:?} is manageable: {err:#}",
+        native_window.id()
+      );
 
+      return Ok(());
+    }
+  };
 
   // Create the window instance. This may fail if the window handle has
   // already been destroyed.
@@ -86,29 +92,17 @@ pub fn manage_window(
       window_container.clone()
     });
 
-    // Reapply the workspace's columns (if any) so the new tiling
-    // window slots into a side column. Re-assert focus on the new
-    // window afterwards, since the tree rebuild shifts the focus
-    // chain back to the center.
+    // Reapply the workspace's columns (if any) so the new tiling window
+    // slots into the next free position without displacing any window
+    // already on screen. Re-assert focus on the new window afterwards,
+    // since the tree rebuild shifts the focus chain.
     if is_tiling {
-      // Affinity only applies in grid mode: place the new window in the
-      // same column as the previously focused tiling window. Exclude the
-      // new window itself — it was already made focus descendant above.
-      // In master-stack modes no affinity applies; clearing it prevents a
-      // stale target from reordering the grid on the next toggle into it.
-      let affinity = if workspace.columns_mode() == ColumnsMode::Grid {
-        let new_id = window_container.id();
-        workspace.descendant_focus_order().find_map(|c| match c {
-          Container::TilingWindow(w) if w.id() != new_id => Some(w.id()),
-          _ => None,
-        })
-      } else {
-        None
-      };
-      workspace.set_grid_affinity(affinity);
-
-      workspace.push_window_order(window_container.id());
-      reapply_assigned_columns(&workspace, state, config)?;
+      reapply_columns_for_new_window(
+        &workspace,
+        window_container.id(),
+        state,
+        config,
+      )?;
       set_focused_descendant(&window_container, None);
       state.pending_sync.queue_focus_change();
     }

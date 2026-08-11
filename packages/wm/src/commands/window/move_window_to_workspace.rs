@@ -77,8 +77,11 @@ pub fn move_window_to_workspace(
     let is_tiling = window.is_tiling_window();
     let moved_window_id = window.id();
 
-    // Remove from source workspace's window order before the move.
-    current_workspace.remove_from_window_order(moved_window_id);
+    // The window is leaving: give up the master designation so the source
+    // workspace promotes a survivor instead of holding a dangling id.
+    if current_workspace.master_window() == Some(moved_window_id) {
+      current_workspace.set_master_window(None);
+    }
 
     // Focus target is `None` if the window is not focused.
     let focus_target = state.focus_target_after_removal(&window);
@@ -116,9 +119,6 @@ pub fn move_window_to_workspace(
       }
     }
 
-    // Add to target workspace's window order after the move.
-    target_workspace.push_window_order(moved_window_id);
-
     // When moving a focused window within the tree to another workspace,
     // the target workspace will get displayed. If moving the window e.g.
     // from monitor 1 -> 2, and the target workspace is hidden on that
@@ -153,11 +153,14 @@ pub fn move_window_to_workspace(
       .pending_sync
       .queue_workspace_to_reorder(target_workspace.clone());
 
-    // Reapply assigned columns now the window has changed workspaces.
+    // Reapply assigned columns now the window has changed workspaces. The
+    // moved window takes the last slot on the target, so nothing already
+    // there changes column.
     if is_tiling {
       reapply_columns_after_move(
         &current_workspace,
         &target_workspace,
+        moved_window_id,
         state,
         config,
       )?;

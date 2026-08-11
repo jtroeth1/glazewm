@@ -4,6 +4,7 @@
 use uuid::Uuid;
 use wm_common::TilingDirection;
 
+use super::spec::row_major;
 use crate::{
   commands::container::{
     move_container_within_tree, set_focused_descendant,
@@ -24,8 +25,9 @@ use crate::{
 /// This is the one place that knows how the declarative columns map onto
 /// the container tree: [`ColumnGrid::read`] lifts the tree into the grid
 /// and [`ColumnGrid::render`] rebuilds the tree from it. The commands
-/// operate purely on the grid in between, and the layout's center is
-/// defined here as the widest column (see [`ColumnGrid::center_index`]).
+/// operate purely on the grid in between. The grid carries no notion of
+/// which column is the center — that is decided by the workspace's
+/// designated master window, never inferred from column widths.
 pub(super) struct ColumnGrid {
   /// Columns left-to-right, each a top-to-bottom stack of windows.
   pub columns: Vec<Vec<TilingWindow>>,
@@ -70,11 +72,21 @@ impl ColumnGrid {
     self.columns.iter().map(Vec::len).sum()
   }
 
-  /// Index of the widest column, treated as the layout's center.
-  pub fn center_index(&self) -> usize {
-    (0..self.widths.len())
-      .max_by(|&a, &b| self.widths[a].total_cmp(&self.widths[b]))
-      .unwrap_or(0)
+  /// Every window in the workspace's canonical order: row-major, left to
+  /// right — row 0 of every column in turn, then row 1, and so on.
+  ///
+  /// This is the workspace's window ordering, and it is derived from the
+  /// container tree on every read, so it can never disagree with what is
+  /// on screen.
+  ///
+  /// Row-major rather than column-major because that is the order
+  /// [`super::spec::distribute_columns`] deals windows into columns, which
+  /// makes reading and distributing exact inverses: applying a layout to
+  /// its own output is a no-op, and adding a window at the end of the
+  /// order moves nothing else. Reading column-major would permute the
+  /// windows on every reapply.
+  pub fn windows(&self) -> Vec<TilingWindow> {
+    row_major(&self.columns)
   }
 
   /// `(column, row)` position of the window with `id`, if present.
@@ -129,9 +141,8 @@ impl ColumnGrid {
     // restore it after Phase 2. `move_container_within_tree` and
     // `wrap_in_split_container` both manipulate the child focus order,
     // which can leave the wrong window as the focused descendant.
-    let focused_id = workspace
-      .descendant_focus_order()
-      .find_map(|c| match c {
+    let focused_id =
+      workspace.descendant_focus_order().find_map(|c| match c {
         Container::TilingWindow(w) => Some(w.id()),
         _ => None,
       });

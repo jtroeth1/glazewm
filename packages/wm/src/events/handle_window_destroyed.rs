@@ -4,7 +4,6 @@ use wm_platform::WindowId;
 
 use crate::{
   commands::{
-    container::set_focused_descendant,
     window::unmanage_window,
     workspace::{deactivate_workspace, reapply_assigned_columns},
   },
@@ -27,9 +26,12 @@ pub fn handle_window_destroyed(
   if let Some(window) = found_window {
     let workspace = window.workspace().context("No workspace.")?;
 
-    // Remove the window from the workspace's focus-order buffer
-    // before unmanaging so the LIFO list stays consistent.
-    workspace.remove_from_window_order(window.id());
+    // Give up the master designation before unmanaging, so the layout
+    // promotes the first remaining window in on-screen order instead of
+    // holding a dangling id.
+    if workspace.master_window() == Some(window.id()) {
+      workspace.set_master_window(None);
+    }
 
     info!("Window closed: {window}");
     unmanage_window(window, state)?;
@@ -43,18 +45,9 @@ pub fn handle_window_destroyed(
       deactivate_workspace(workspace, state)?;
     } else {
       // Re-tidy the workspace's columns (if any) now a window's gone.
+      // `unmanage_window` has already moved focus to the most recently
+      // focused survivor and the columns render preserves it.
       reapply_assigned_columns(&workspace, state, config)?;
-
-      // Focus the last window in the LIFO order buffer.
-      let focus_target = workspace
-        .window_order()
-        .last()
-        .and_then(|id| state.container_by_id(*id))
-        .or_else(|| state.focused_container());
-      if let Some(target) = focus_target {
-        set_focused_descendant(&target, None);
-        state.pending_sync.queue_focus_change();
-      }
     }
   }
 

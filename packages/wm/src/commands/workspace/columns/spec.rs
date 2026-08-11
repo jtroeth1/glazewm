@@ -4,8 +4,6 @@
 //! assignment can be unit-tested with plain indices in place of live
 //! windows.
 
-use wm_common::ColumnBias;
-
 /// One column in a `columns` spec.
 #[derive(Debug, PartialEq)]
 pub(super) enum ColumnKind {
@@ -56,15 +54,37 @@ pub(super) fn parse_columns_spec(
   Ok(kinds)
 }
 
-/// Distributes `center` and the `rest` of the windows into columns per the
-/// parsed `kinds`, in on-screen order.
+/// Distributes `center` and the `rest` of the windows into columns per
+/// the parsed `kinds`.
 ///
-/// `center` fills the `C` column; each fixed column takes its exact count;
-/// `*` columns share the leftover windows evenly, with `bias` deciding
-/// which end claims the odd window(s) when they don't divide evenly. Any
-/// windows still unplaced (fixed counts under-specify the total and there
-/// is no `*`) are appended to the last non-center column, so nothing is
-/// dropped.
+/// `center` fills the `C` column. The `rest` are dealt one per column
+/// across the non-center columns left-to-right, then a second row, and so
+/// on — a fixed column drops out of the deal once it holds its count, a
+/// `*` column never does. So `2,C,*` with five leftovers fills as
+/// `[1,3] C [2,4,5]`.
+///
+/// Two properties matter, and this is the only deal order that has both:
+///
+/// - **Prefix-stable.** Leftover window `i` lands in the same column no
+///   matter how many leftovers there are, so opening or closing a window
+///   never shuffles the others between columns. The previous
+///   even-share-per-column split moved windows across columns every time
+///   the count changed.
+/// - **Invertible.** Reading the resulting grid back in row-major order
+///   (see [`ColumnGrid::windows`]) reproduces this exact sequence, so
+///   applying a layout to its own output is a no-op. Reading is how the
+///   window order is recovered — there is no stored order to consult — so
+///   without this, every reapply would permute the windows.
+///
+/// Invertibility is why there is no left/right bias knob: dealing from
+/// the right, or from any offset other than the leftmost column, is not
+/// recoverable from the grid, and a layout that permutes its own output
+/// is exactly the non-determinism this module exists to remove. Mirroring
+/// is expressed by reversing the spec instead (see `reverse_spec`).
+///
+/// Any windows still unplaced (every column is a fixed one and the counts
+/// under-specify the total) are appended to the last non-center column,
+/// so nothing is dropped.
 ///
 /// Generic over the item so the assignment can be unit-tested with plain
 /// indices in place of live windows.
@@ -72,57 +92,71 @@ pub(super) fn distribute_columns<T: Clone>(
   kinds: &[ColumnKind],
   center: T,
   rest: Vec<T>,
-  bias: &ColumnBias,
 ) -> Vec<Vec<T>> {
-  // The `*` columns share whatever the fixed columns don't claim.
-  let fixed_total = kinds
-    .iter()
-    .map(|k| match k {
-      ColumnKind::Fixed(n) => *n,
-      _ => 0,
-    })
-    .sum::<usize>();
-  let star_count = kinds
-    .iter()
-    .filter(|k| matches!(k, ColumnKind::Star))
-    .count();
-  let leftover = rest.len().saturating_sub(fixed_total);
-  let star_base = leftover.checked_div(star_count).unwrap_or(0);
-  let star_extra = leftover.checked_rem(star_count).unwrap_or(0);
+  let mut columns: Vec<Vec<T>> =
+    kinds.iter().map(|_| Vec::new()).collect();
 
-  let mut rest_iter = rest.into_iter();
-  let mut stars_seen = 0;
-  let mut columns = Vec::with_capacity(kinds.len());
-  for kind in kinds {
-    match kind {
-      ColumnKind::Center => columns.push(vec![center.clone()]),
-      ColumnKind::Fixed(n) => {
-        columns.push(rest_iter.by_ref().take(*n).collect());
+  // The non-center columns paired with their capacity, in deal order.
+  let dealt = kinds
+    .iter()
+    .enumerate()
+    .filter_map(|(index, kind)| match kind {
+      ColumnKind::Center => {
+        columns[index].push(center.clone());
+        None
       }
-      ColumnKind::Star => {
-        // The odd leftover windows go to the first `star_extra` stars for
-        // a left bias, or the last `star_extra` stars for a right bias.
-        let gets_extra = match bias {
-          ColumnBias::Left => stars_seen < star_extra,
-          ColumnBias::Right => stars_seen >= star_count - star_extra,
-        };
-        let take = star_base + usize::from(gets_extra);
-        stars_seen += 1;
-        columns.push(rest_iter.by_ref().take(take).collect());
+      ColumnKind::Fixed(count) => Some((index, Some(*count))),
+      ColumnKind::Star => Some((index, None)),
+    })
+    .collect::<Vec<_>>();
+
+  if dealt.is_empty() {
+    return columns;
+  }
+
+  // Deal row by row, skipping any fixed column that is already full.
+  let mut rest = rest.into_iter();
+  for row in 0.. {
+    let mut placed = false;
+
+    for &(index, capacity) in &dealt {
+      if capacity.is_some_and(|capacity| row >= capacity) {
+        continue;
       }
+      let Some(window) = rest.next() else { break };
+      columns[index].push(window);
+      placed = true;
+    }
+
+    // Either everything is placed or every column is full.
+    if !placed {
+      break;
     }
   }
 
-  let remaining = rest_iter.collect::<Vec<_>>();
+  // Every column is a full fixed column but windows remain: keep them
+  // rather than dropping them off-screen.
+  let remaining = rest.collect::<Vec<_>>();
   if !remaining.is_empty() {
-    let target = kinds
-      .iter()
-      .rposition(|k| !matches!(k, ColumnKind::Center))
-      .unwrap_or(0);
-    columns[target].extend(remaining);
+    let (last, _) = dealt[dealt.len() - 1];
+    columns[last].extend(remaining);
   }
 
   columns
+}
+
+/// The windows of a distributed grid in the order
+/// [`distribute_columns`] dealt them: row-major, left to right.
+///
+/// The inverse of [`distribute_columns`], and the order the container
+/// tree is read back in.
+pub(super) fn row_major<T: Clone>(columns: &[Vec<T>]) -> Vec<T> {
+  let depth = columns.iter().map(Vec::len).max().unwrap_or(0);
+
+  (0..depth)
+    .flat_map(|row| columns.iter().filter_map(move |col| col.get(row)))
+    .cloned()
+    .collect()
 }
 
 /// The width fraction of each column: the center takes `center_fraction`
@@ -151,10 +185,9 @@ pub(super) fn column_widths(
 
 #[cfg(test)]
 mod tests {
-  use wm_common::ColumnBias;
-
   use super::{
-    column_widths, distribute_columns, parse_columns_spec, ColumnKind,
+    column_widths, distribute_columns, parse_columns_spec, row_major,
+    ColumnKind,
   };
 
   #[test]
@@ -191,27 +224,64 @@ mod tests {
   }
 
   #[test]
-  fn distributes_even_stars() {
-    // `*,C,*` with 4 side windows → two even stacks flanking the center.
+  fn deals_side_windows_row_by_row() {
+    // `*,C,*` with 4 side windows → dealt alternately, left first.
     let kinds = parse_columns_spec("*,C,*").unwrap();
-    let columns =
-      distribute_columns(&kinds, 0, vec![1, 2, 3, 4], &ColumnBias::Left);
-    assert_eq!(columns, vec![vec![1, 2], vec![0], vec![3, 4]]);
+    let columns = distribute_columns(&kinds, 0, vec![1, 2, 3, 4]);
+    assert_eq!(columns, vec![vec![1, 3], vec![0], vec![2, 4]]);
   }
 
   #[test]
-  fn bias_breaks_uneven_star_split() {
-    let kinds = parse_columns_spec("*,C,*").unwrap();
+  fn row_major_inverts_the_deal() {
+    // Reading the grid back row-major must reproduce the sequence that
+    // was dealt into it, otherwise reapplying a layout to its own output
+    // permutes the windows.
+    for spec in ["*,C,*", "C,*", "2,C,*", "1,2,C,*", "*,C"] {
+      let kinds = parse_columns_spec(spec).unwrap();
 
-    // Odd leftover: left bias gives the extra window to the first stack.
-    let left =
-      distribute_columns(&kinds, 0, vec![1, 2, 3], &ColumnBias::Left);
-    assert_eq!(left, vec![vec![1, 2], vec![0], vec![3]]);
+      for count in 0..=8 {
+        let rest = (1..=count).collect::<Vec<_>>();
+        let columns = distribute_columns(&kinds, 0, rest.clone());
 
-    // Right bias gives it to the last stack.
-    let right =
-      distribute_columns(&kinds, 0, vec![1, 2, 3], &ColumnBias::Right);
-    assert_eq!(right, vec![vec![1], vec![0], vec![2, 3]]);
+        // The center drops out of the read; the rest come back in order.
+        let read = row_major(&columns)
+          .into_iter()
+          .filter(|window| *window != 0)
+          .collect::<Vec<_>>();
+        assert_eq!(read, rest, "spec `{spec}` with {count} side windows");
+
+        // Applying the layout to what was read back is a no-op.
+        assert_eq!(distribute_columns(&kinds, 0, read), columns);
+      }
+    }
+  }
+
+  #[test]
+  fn growing_the_window_count_never_moves_a_window() {
+    // The regression this guards: with the old even-share-per-column
+    // split, going from 1 to 2 side windows moved the existing window
+    // from the left stack to the right (or vice versa), so windows
+    // visibly jumped columns every time one was opened or closed.
+    for spec in ["*,C,*", "C,*", "2,C,*", "1,2,C,*"] {
+      let kinds = parse_columns_spec(spec).unwrap();
+      let mut placements = Vec::new();
+
+      for count in 1..=6 {
+        let rest = (1..=count).collect::<Vec<_>>();
+        let columns = distribute_columns(&kinds, 0, rest);
+
+        let column_of = |window: i32| {
+          columns.iter().position(|col| col.contains(&window))
+        };
+
+        placements.push((1..=count).map(column_of).collect::<Vec<_>>());
+      }
+
+      // Every window keeps the column it had at the smaller count.
+      for pair in placements.windows(2) {
+        assert_eq!(pair[0][..], pair[1][..pair[0].len()], "spec `{spec}`");
+      }
+    }
   }
 
   #[test]
@@ -219,23 +289,24 @@ mod tests {
     // `1,C` places one window in the fixed column and no `*` to absorb the
     // rest, so the leftovers land in the last non-center column.
     let kinds = parse_columns_spec("1,C").unwrap();
-    let columns =
-      distribute_columns(&kinds, 0, vec![1, 2, 3], &ColumnBias::Left);
+    let columns = distribute_columns(&kinds, 0, vec![1, 2, 3]);
     assert_eq!(columns, vec![vec![1, 2, 3], vec![0]]);
   }
 
   #[test]
-  fn fixed_column_takes_exact_count_and_star_takes_rest() {
-    // `2,C,*`: the fixed column takes exactly two windows and the `*`
-    // column absorbs the remaining three.
+  fn fixed_column_stops_taking_windows_at_its_count() {
+    // `2,C,*`: the fixed column takes exactly two windows, dealt on the
+    // first two rows, and the `*` column absorbs the remaining three.
     let kinds = parse_columns_spec("2,C,*").unwrap();
-    let columns = distribute_columns(
-      &kinds,
-      0,
-      vec![1, 2, 3, 4, 5],
-      &ColumnBias::Left,
-    );
-    assert_eq!(columns, vec![vec![1, 2], vec![0], vec![3, 4, 5]]);
+    let columns = distribute_columns(&kinds, 0, vec![1, 2, 3, 4, 5]);
+    assert_eq!(columns, vec![vec![1, 3], vec![0], vec![2, 4, 5]]);
+  }
+
+  #[test]
+  fn center_only_spec_places_just_the_center() {
+    let kinds = parse_columns_spec("C").unwrap();
+    let columns = distribute_columns(&kinds, 0, vec![]);
+    assert_eq!(columns, vec![vec![0]]);
   }
 
   #[test]

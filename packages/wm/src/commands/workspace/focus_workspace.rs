@@ -65,11 +65,12 @@ pub fn focus_workspace(
     set_focused_descendant(&container_to_focus, None);
     state.pending_sync.queue_focus_change();
 
-    // Apply columns on first focus (buffer not yet populated). Skip
-    // reapply on subsequent switches so manual rearrangements are preserved.
-    if target_workspace.window_order().is_empty() {
-      reapply_assigned_columns(&target_workspace, state, config)?;
-    }
+    // Reapply the workspace's columns on every switch. This is now safe
+    // to do unconditionally: the layout is idempotent, so it preserves
+    // manual rearrangements instead of replaying a stored order over
+    // them, and it picks up a new spec when the workspace has moved to a
+    // differently-shaped monitor.
+    reapply_assigned_columns(&target_workspace, state, config)?;
 
     // Display the workspace to switch focus to.
     state
