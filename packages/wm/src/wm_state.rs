@@ -155,6 +155,10 @@ impl WmState {
         .nearest_monitor(&native_window)
         .and_then(|m| m.displayed_workspace());
 
+      // Kept for the disposition check below, since `manage_window`
+      // consumes the window. Cloning only copies the handle.
+      let probe = native_window.clone();
+
       if let Some(workspace) = nearest_workspace {
         if let Err(err) = manage_window(
           native_window,
@@ -169,6 +173,19 @@ impl WmState {
           "Skipping window at startup, no displayed workspace found for \
            it: {}",
           describe_window(&native_window)
+        );
+      }
+
+      // Report the outcome per handle rather than per filter. Several
+      // rejection paths inside `check_is_manageable` return `Ok(None)`
+      // silently or only at `debug!`, so a window that quietly fails to
+      // be adopted leaves no trace at the default verbosity. Asking the
+      // state whether the handle landed catches every path at once.
+      if self.window_from_native(&probe).is_none() {
+        tracing::info!(
+          "Startup: window NOT managed: {} {}",
+          describe_window(&probe),
+          describe_window_styles(&probe)
         );
       }
     }
@@ -231,16 +248,20 @@ impl WmState {
   /// Gets the monitor that encompasses the largest portion of a given
   /// window.
   ///
-  /// Defaults to the first monitor if the nearest monitor is invalid.
+  /// Defaults to the first monitor if the nearest display cannot be
+  /// resolved or is not in the container tree. Returns `None` only when
+  /// there are no monitors at all, since a window that resolves to no
+  /// monitor is silently dropped by the callers that place windows.
   pub fn nearest_monitor(
     &self,
     native_window: &NativeWindow,
   ) -> Option<Monitor> {
     self
-      .monitor_from_native(
-        &self.dispatcher.nearest_display(native_window).ok()?,
-      )
-      .or(self.monitors().first().cloned())
+      .dispatcher
+      .nearest_display(native_window)
+      .ok()
+      .and_then(|native_display| self.monitor_from_native(&native_display))
+      .or_else(|| self.monitors().first().cloned())
   }
 
   /// Gets monitor that corresponds to the given `Display`.
@@ -794,4 +815,33 @@ fn describe_window(native_window: &NativeWindow) -> String {
     (Ok(title), _) => format!("'{title}'"),
     _ => format!("handle {:?}", native_window.id()),
   }
+}
+
+/// Describes the attributes that decide whether a window is manageable,
+/// so a skipped window can be diagnosed from the log alone.
+#[cfg(target_os = "windows")]
+fn describe_window_styles(native_window: &NativeWindow) -> String {
+  use wm_platform::{
+    NativeWindowWindowsExt, WS_CAPTION, WS_CHILD, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
+  };
+
+  format!(
+    "(handle={:?} visible={:?} cloaked={:?} child={} no_activate={} \
+     tool_window={} caption={} owned={})",
+    native_window.id(),
+    native_window.is_visible(),
+    native_window.is_cloaked(),
+    native_window.has_window_style(WS_CHILD),
+    native_window.has_window_style_ex(WS_EX_NOACTIVATE),
+    native_window.has_window_style_ex(WS_EX_TOOLWINDOW),
+    native_window.has_window_style(WS_CAPTION),
+    native_window.has_owner_window(),
+  )
+}
+
+/// Non-Windows builds have no equivalent style flags to report.
+#[cfg(not(target_os = "windows"))]
+fn describe_window_styles(_native_window: &NativeWindow) -> String {
+  String::new()
 }

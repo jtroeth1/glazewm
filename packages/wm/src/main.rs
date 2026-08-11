@@ -309,14 +309,26 @@ async fn start_wm(
 
 /// Initialize logging with the specified verbosity level.
 ///
-/// Error logs are saved to `~/.glzr/glazewm/errors.log`.
+/// Writes three sinks: stdout, `~/.glzr/glazewm/glazewm.log` at the
+/// requested verbosity, and `~/.glzr/glazewm/errors.log` for errors only.
+///
+/// The verbosity-level file sink is what makes startup diagnosable. A
+/// release build runs on the `windows` subsystem with no attached console,
+/// and Task Scheduler launches it without redirection, so stdout is
+/// discarded outright — every `info!`/`warn!` explaining why a window was
+/// skipped used to vanish, leaving only ERROR-level records on disk.
 fn setup_logging(verbosity: &Verbosity) -> anyhow::Result<()> {
-  let error_log_dir = home::home_dir()
+  let log_dir = home::home_dir()
     .context("Unable to get home directory.")?
     .join(".glzr/glazewm/");
 
   let error_writer =
-    tracing_appender::rolling::never(error_log_dir, "errors.log");
+    tracing_appender::rolling::never(&log_dir, "errors.log");
+
+  // Rolls daily so the file cannot grow without bound across long
+  // uptimes; today's file is `glazewm.log`, older ones get a date suffix.
+  let log_writer =
+    tracing_appender::rolling::daily(&log_dir, "glazewm.log");
 
   let subscriber = tracing_subscriber::registry()
     .with(
@@ -325,8 +337,15 @@ fn setup_logging(verbosity: &Verbosity) -> anyhow::Result<()> {
         .with_writer(std::io::stdout.with_max_level(verbosity.level())),
     )
     .with(
+      // Output to the persistent log file with the same verbosity.
+      fmt::Layer::new()
+        .with_ansi(false)
+        .with_writer(log_writer.with_max_level(verbosity.level())),
+    )
+    .with(
       // Output to error log file.
       fmt::Layer::new()
+        .with_ansi(false)
         .with_writer(error_writer.with_max_level(Level::ERROR)),
     );
 

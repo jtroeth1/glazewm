@@ -182,11 +182,6 @@ impl WindowManager {
         .and_then(|monitor| monitor.displayed_workspace())
         .map(Into::into);
 
-      tracing::info!(
-        "Managing newly discovered window: {:?}",
-        native_window.id()
-      );
-
       if let Err(err) =
         manage_window(native_window, target_parent, state, config)
       {

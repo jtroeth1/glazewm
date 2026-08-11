@@ -24,26 +24,25 @@ Cross-compile target: `x86_64-pc-windows-gnu` (MinGW). Cannot run tests natively
 # Build
 cargo build --release --target x86_64-pc-windows-gnu
 
-# Deploy: exit GlazeWM first (the running image is locked), then promote.
-cp "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt.exe" \
-   "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt-bak.exe"
+# Stage, then deploy elevated (stops GlazeWM, backs up, promotes, relaunches).
 cp target/x86_64-pc-windows-gnu/release/glazewm.exe \
-   "/mnt/c/Program Files/glzr.io/GlazeWM/glazewm-jt.exe"
-
-# Relaunch elevated.
-powershell.exe -NoProfile -Command "schtasks /run /tn 'StartGlazeZsolt'"
+   /mnt/c/Users/jtroeth/.glzr/glazewm/glazewm-new.exe
+powershell.exe -NoProfile -Command "Start-Process powershell.exe \
+  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File', \
+  'C:\Users\jtroeth\.glzr\glazewm\deploy-glazewm.ps1' -Verb RunAs -Wait"
 ```
 
-- WSL can write to `C:\Program Files\glzr.io\GlazeWM\` directly — no elevation needed for the copy. But the running `.exe` is locked by Windows, so **GlazeWM must be exited before promoting**.
-- The scheduled task that actually runs GlazeWM is `StartGlazeZsolt`, and its action is `glazewm-jt.exe` **directly** — it does *not* invoke `start-glazewm.ps1`. So the staging/auto-update path below is currently **inert**; staging `glazewm-new.exe` alone will not update anything.
-- **Staging path (only works if the task is repointed at the script)**: `cp …/release/glazewm.exe /mnt/c/Users/jtroeth/.glzr/glazewm/glazewm-new.exe`. The binary must be named `glazewm-new.exe`. On launch `start-glazewm.ps1` backs up `glazewm-jt.exe` → `glazewm-jt-bak.exe`, promotes the staged build, removes the staging file, then launches. To enable it, change the task action to `powershell.exe -NoProfile -File "%USERPROFILE%\.glzr\glazewm\start-glazewm.ps1"`.
-- GlazeWM must run **elevated** (Task Scheduler) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls.
+- **Use `deploy-glazewm.ps1`.** `C:\Program Files\glzr.io\GlazeWM\` is *not* writable from WSL without elevation (ACL grants `BUILTIN\Users` only `ReadAndExecute`), and the running `.exe` is locked besides. The script stops `glazewm-jt` + `glazewm-watcher`, backs up `glazewm-jt.exe` → `glazewm-jt-bak.exe`, promotes `glazewm-new.exe`, deletes the staging file, then runs `schtasks /run /tn StartGlazeZsolt`.
+- The staged binary MUST be named `glazewm-new.exe`. Verify the promotion with `b2sum -l 64` on both the build output and the installed exe.
+- The scheduled task `StartGlazeZsolt` runs `glazewm-jt.exe` **directly** — it does *not* invoke `start-glazewm.ps1`, so that script's own staging logic is inert.
+- GlazeWM must run **elevated** (Task Scheduler) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls, then exit.
 - Linker configured in `.cargo/config.toml`: `x86_64-w64-mingw32-gcc`.
 
 ## Code Style
 
 - **No `.unwrap()`**. Use `anyhow` in all crates except `wm-platform` (which uses `crate::Error`/`crate::Result`).
-- **Logging**: `tracing` macros (`tracing::info!`, `tracing::warn!`, etc.). Logs go to stdout; `errors.log` captures ERROR level only.
+- **Logging**: `tracing` macros (`tracing::info!`, `tracing::warn!`, etc.). `setup_logging` installs **three** sinks: stdout, `errors.log` (ERROR only), and `glazewm.log.<date>` (daily-rolled, full verbosity level, default INFO). The release build is a `windows`-subsystem binary launched by Task Scheduler with no console and no redirection, so **stdout goes nowhere in production** — the rolling file is the only way to see `info!`/`warn!` from a real run. File sinks set `.with_ansi(false)`.
+- **Log noise is a bug.** `discover_windows` runs every 5s over every visible window; anything logged at `info!` per-window per-tick buries the diagnostics that matter. Log adoptions where they happen (`manage_window` already emits `New window managed:`), not at the call site.
 - **Formatting**: `rustfmt.toml` — 2-space tabs, 75 char max width, crate-level import granularity.
 - **Linting**: `clippy::all` + `clippy::pedantic` at warn level.
 - **Comments**: All functions documented. Punctuation at end of all comments. Unsafe blocks get `// SAFETY: ...`. Type names in backticks.
@@ -64,8 +63,9 @@ powershell.exe -NoProfile -Command "schtasks /run /tn 'StartGlazeZsolt'"
 - `manage_window()` → `check_is_manageable()` filters: not visible → skip, `WS_CHILD`/`WS_EX_NOACTIVATE`/`WS_EX_TOOLWINDOW` → skip, owner without caption → skip. A `check_is_manageable` *error* is logged at `warn!` with the handle instead of being swallowed by `unwrap_or(None)`.
 - Window rules (config `window_rules:`) run after management — can `ignore`, `set floating`, etc.
 - `handle_window_shown` event catches windows that appear after startup.
-- Diagnostic logging in `check_is_manageable` reports why each window is skipped (process, title, style flags).
-- `discover_windows()` (5s tick) resolves the nearest monitor's displayed workspace as `target_parent` and logs each newly discovered window at `info!`.
+- **Startup disposition audit.** `WmState::populate` logs `Startup: found N visible windows to manage.`, then for every handle that is still absent from the tree after its manage attempt, `Startup: window NOT managed: <describe_window> (<describe_window_styles>)` — handle, visible, cloaked, child, no_activate, tool_window, caption, owned. The counts must reconcile: *visible = managed + NOT managed*. This is the tool for "GlazeWM missed my window"; `describe_window_styles` lives at the end of `wm_state.rs` and is Windows-only (non-Windows returns an empty string).
+- `discover_windows()` (5s tick) re-scans `visible_windows()` and adopts anything absent from the tree, resolving the nearest monitor's displayed workspace as `target_parent` (passing `None` would attach next to the *focused* container instead). It skips already-managed and `ignored_windows`, but it has **no memory of windows `check_is_manageable` rejected**, so it re-probes every permanently-unmanageable tool window every tick — cheap, but it must stay silent (see Code Style).
+- `WmState::nearest_monitor` falls back to the first monitor whenever the nearest display cannot be resolved *or* is not in the tree, and returns `None` only when there are no monitors. Callers that place windows drop the window silently on `None`, so that fallback is load-bearing.
 
 ### Cloak Recovery (`cloak_journal.rs`)
 With `hide_method: 'cloak'`, windows on non-displayed workspaces are hidden via `IApplicationView::set_cloak`. A cloaked window is invisible to `visible_windows()` *and* to `discover_windows()`, and `show()`/`SW_SHOWNA` cannot reveal it — only uncloaking can. Previously nothing uncloaked on exit, so a crash orphaned those windows permanently: unmanaged, untileable, and (with title bars hidden) unclosable.
@@ -159,11 +159,12 @@ Custom Zebar widget pack at `/mnt/c/Users/jtroeth/.glzr/zebar/custom-bar/`.
 ## Config Locations (Windows)
 
 - GlazeWM config: `C:\Users\jtroeth\.glzr\glazewm\config.yaml`
-- GlazeWM launcher: `C:\Users\jtroeth\.glzr\glazewm\start-glazewm.ps1`
+- GlazeWM deploy script: `C:\Users\jtroeth\.glzr\glazewm\deploy-glazewm.ps1` (run elevated; the supported deploy path)
+- GlazeWM launcher: `C:\Users\jtroeth\.glzr\glazewm\start-glazewm.ps1` (not used by the scheduled task)
 - GlazeWM staging: `C:\Users\jtroeth\.glzr\glazewm\glazewm-new.exe` (consumed on next launch)
 - GlazeWM binary: `C:\Program Files\glzr.io\GlazeWM\glazewm-jt.exe`
 - GlazeWM backup: `C:\Program Files\glzr.io\GlazeWM\glazewm-jt-bak.exe`
-- GlazeWM logs: `C:\Users\jtroeth\.glzr\glazewm\errors.log` (ERROR only), stdout for INFO+
+- GlazeWM logs: `C:\Users\jtroeth\.glzr\glazewm\glazewm.log.<YYYY-MM-DD>` (daily, INFO+ — **the useful one**), `errors.log` (ERROR only). Multiple instances append to the same daily file; split sessions on `Starting WM with log level`.
 - GlazeWM cloak journal: `C:\Users\jtroeth\.glzr\glazewm\cloaked-windows.txt` (deleted on successful startup recovery)
 - Zebar config: `C:\Users\jtroeth\.glzr\zebar\custom-bar\`
 - Zebar settings: `C:\Users\jtroeth\.glzr\zebar\settings.json`
