@@ -625,14 +625,15 @@ pub fn apply_center(
 /// The workspace is treated as columns left-to-right, each a top-to-bottom
 /// stack of windows. Interior moves swap the focused window with a
 /// neighbouring slot: `Up`/`Down` with the window above/below it in its
-/// column, `Left`/`Right` with the nearest window (by row) in the adjacent
-/// column. Swapping keeps every column's window count fixed, so the center
-/// column — a single-window slot — always stays exactly one window: moving
-/// a side window into the center displaces the old center out to the
-/// vacated side slot, and moving the center window out promotes the side
-/// window it swaps with into the center. Whichever window ends up in the
-/// center column becomes the workspace's master, so the arrangement
-/// survives the next reapply. The result is rendered directly through
+/// column, `Left`/`Right` with the window level with it in the adjacent
+/// column ([`straight_across_row`]). Swapping keeps every column's
+/// window count fixed, so the center column — a single-window slot —
+/// always stays exactly one window: moving a side window into the center
+/// displaces the old center out to the vacated side slot, and moving the
+/// center window out promotes the side window it swaps with into the
+/// center. Whichever window ends up in the center column becomes the
+/// workspace's master, so the arrangement survives the next reapply.
+/// The result is rendered directly through
 /// `ColumnGrid::render`, so the declarative columns stay intact and the
 /// spec is not re-derived from geometry, and focus follows the moved
 /// window.
@@ -713,10 +714,16 @@ pub fn move_window_in_columns(
           return Ok(true);
         }
       };
-      // Swap with the nearest window in the target column so both columns
-      // keep their window counts — the center stays a single window.
-      let target_row =
-        row.min(grid.columns[target_col].len().saturating_sub(1));
+      // Swap with the window level with this one so both columns keep
+      // their window counts — the center stays a single window.
+      let Some(target_row) = straight_across_row(
+        &grid.columns[col],
+        row,
+        &grid.columns[target_col],
+      ) else {
+        return Ok(false);
+      };
+
       let moved = grid.columns[col][row].clone();
       grid.columns[col][row] =
         grid.columns[target_col][target_row].clone();
@@ -848,18 +855,30 @@ fn neighbour_in_column(
 }
 
 /// Returns the window in `target` level with row `source_row` of
-/// `source`: the one whose vertical span overlaps the source window's
-/// the most, ties going to the topmost.
-///
-/// Matching by row index instead would drift whenever the two columns
-/// hold different numbers of windows, which grid mode produces for any
-/// odd window count: row 1 of a two-row column covers the bottom half,
-/// which is row 2 of a three-row column, not row 1.
+/// `source` — see [`straight_across_row`].
 fn straight_across(
   source: &[TilingWindow],
   source_row: usize,
   target: &[TilingWindow],
 ) -> Option<Uuid> {
+  straight_across_row(source, source_row, target)
+    .and_then(|row| target.get(row))
+    .map(CommonGetters::id)
+}
+
+/// Returns the row in `target` level with row `source_row` of `source`:
+/// the one whose vertical span overlaps the source window's the most,
+/// ties going to the topmost. `None` for an empty `target`.
+///
+/// Matching by row index instead would drift whenever the two columns
+/// hold different numbers of windows, which grid mode produces for any
+/// odd window count: row 1 of a two-row column covers the bottom half,
+/// which is row 2 of a three-row column, not row 1.
+fn straight_across_row(
+  source: &[TilingWindow],
+  source_row: usize,
+  target: &[TilingWindow],
+) -> Option<usize> {
   let source_span = row_spans(source)
     .get(source_row)
     .copied()
@@ -875,9 +894,7 @@ fn straight_across(
     }
   }
 
-  best
-    .and_then(|(index, _)| target.get(index))
-    .map(CommonGetters::id)
+  best.map(|(index, _)| index)
 }
 
 /// Vertical span of every window in a column, as start/end fractions of
@@ -1283,6 +1300,36 @@ mod tests {
       vec![vec![ids[3], ids[1]], vec![ids[0]], vec![ids[2], ids[4]]]
     );
     assert_eq!(workspace_center_window_id(&workspace), Some(ids[0]));
+  }
+
+  #[test]
+  fn moves_window_across_to_the_level_row() {
+    let (mut state, workspace, windows) = setup(5);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    let config = config_with_default_columns("C,*");
+
+    workspace.set_columns_mode(ColumnsMode::Grid);
+    reapply_assigned_columns(&workspace, &mut state, &config).unwrap();
+    assert_eq!(
+      id_grid(&workspace),
+      vec![vec![ids[0], ids[2], ids[4]], vec![ids[1], ids[3]]]
+    );
+
+    // ids[3] fills the bottom half of the two-row column, so it swaps
+    // with the bottom third of the three-row column, not the middle.
+    let window = WindowContainer::TilingWindow(windows[3].clone());
+    assert!(move_window_in_columns(
+      &window,
+      &Direction::Left,
+      &mut state,
+      &config
+    )
+    .unwrap());
+
+    assert_eq!(
+      id_grid(&workspace),
+      vec![vec![ids[0], ids[2], ids[3]], vec![ids[1], ids[4]]]
+    );
   }
 
   #[test]
