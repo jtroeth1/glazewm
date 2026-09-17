@@ -34,8 +34,9 @@ powershell.exe -NoProfile -Command "Start-Process powershell.exe \
 
 - **Use `deploy-glazewm.ps1`.** `C:\Program Files\glzr.io\GlazeWM\` is *not* writable from WSL without elevation (ACL grants `BUILTIN\Users` only `ReadAndExecute`), and the running `.exe` is locked besides. The script stops `glazewm-jt` + `glazewm-watcher`, backs up `glazewm-jt.exe` → `glazewm-jt-bak.exe`, promotes `glazewm-new.exe`, deletes the staging file, then runs `schtasks /run /tn StartGlazeZsolt`.
 - The staged binary MUST be named `glazewm-new.exe`. Verify the promotion with `b2sum -l 64` on both the build output and the installed exe.
-- The scheduled task `StartGlazeZsolt` runs `glazewm-jt.exe` **directly** — it does *not* invoke `start-glazewm.ps1`, so that script's own staging logic is inert.
-- GlazeWM must run **elevated** (Task Scheduler) to reposition windows. Non-elevated instances get "Access is denied" on `SetWindowPos`/z-order calls, then exit.
+- The scheduled task `StartGlazeZsolt` runs `glazewm-jt.exe` **directly**, with `RunLevel=HighestAvailable` + `LogonType=InteractiveToken`. It does *not* invoke `start-glazewm.ps1` or `startGlaze.bat`, so their staging/launch logic is inert. `schtasks /run /tn StartGlazeZsolt` is therefore the one correct **restart** command — it is the only path that yields an elevated instance.
+  - **Trust `Export-ScheduledTask`, never the on-disk XML.** `~/.glzr/glazewm/StartGlazeZsolt.xml` is a *stale export* still describing an old `wt.exe … startGlaze.bat` chain. `startGlaze.bat`, `Start GlazeWM et al`, and `AutoTileGlazeWM` are all dead legacy paths pointing at a `glazewm.exe` that no longer exists in the install dir.
+- GlazeWM must run **elevated** to reposition windows. Verify with the process token, not by assumption: hand-launching the exe gives `Medium elevated=0`; the scheduled task gives `High elevated=1`. Confirm with `GetTokenInformation(TokenIntegrityLevel/TokenElevation)`, and cross-check with `Get-ScheduledTaskInfo -TaskName StartGlazeZsolt` (`LastRunTime`) to prove *which* path actually started the running instance.
 - Linker configured in `.cargo/config.toml`: `x86_64-w64-mingw32-gcc`.
 
 ## Code Style
@@ -97,7 +98,7 @@ drifted from the tree, and a `center_index()` that took the widest column
 (a tie for `C,*` at `center: 0.5`, resolving to the *stack*).
 
 ### Key Files
-- `packages/wm/src/commands/workspace/columns/mod.rs` — Commands: `apply_columns`, `apply_grid`, `reapply_assigned_columns`, `reapply_columns_for_new_window`, `reapply_columns_after_move`, `toggle_columns_mode`, `apply_rotate`, `apply_center`, `move_window_in_columns`, `focus_in_columns`. Internals: `ordered_windows`, `resolve_master`, `center_column`. 30 tests.
+- `packages/wm/src/commands/workspace/columns/mod.rs` — Commands: `apply_columns`, `apply_grid`, `reapply_assigned_columns`, `reapply_columns_for_new_window`, `reapply_columns_after_move`, `toggle_columns_mode`, `apply_rotate`, `apply_center`, `move_window_in_columns`, `focus_in_columns`. Internals: `ordered_windows`, `resolve_master`, `center_column`, `neighbour_in_column`, `straight_across`, `row_spans`. 31 tests.
 - `packages/wm/src/commands/workspace/columns/spec.rs` — Pure spec parsing (`parse_columns_spec`, `distribute_columns`, `row_major`, `column_widths`). No tree dependency. 10 tests.
 - `packages/wm/src/commands/workspace/columns/grid.rs` — `ColumnGrid` bridge: reads container tree into flat grid, renders grid back to tree. Focus preservation across tree rebuilds.
 - `packages/wm/src/models/workspace.rs` — `master_window` and `columns_mode` fields with accessors.
@@ -113,6 +114,13 @@ Side windows are dealt **row-major, left to right**: one per non-center column, 
 - `Grid`: Round-robin into equal columns (which *is* row-major, so also idempotent). Requires ≥4 windows; "armed" with fewer (mode stays Grid, layout falls back to master-stack-left, auto-applies when 4th window arrives).
 
 Toggle cycle via `Alt+G`: Left → Grid → Right → Left.
+
+### Focus Navigation (`focus_in_columns`)
+`Up`/`Down` move within the column. `Left`/`Right` pick the neighbour by mode:
+- `Grid`: straight across — the window whose vertical span (from tiling sizes, so a resized row still matches) overlaps the source window's the most, ties to the topmost. Row *index* is not used: an odd window count gives the two columns different row heights, so index matching drifts.
+- Master-stack modes: the target column's most recently focused window (`SplitContainer::child_focus_order`), falling back to straight across. Leaving the single-window `C` column for a stack and coming back returns to the window you left.
+
+Grid mode deliberately ignores that focus memory. With every column a stack, memory made most sideways moves land on a different row — a diagonal jump whose destination depended on where you last were in that column.
 
 ### Master Window Lifecycle
 - Set explicitly by `apply_center`, `apply_rotate`, and `move_window_in_columns` (any move into or out of the `C` column).
@@ -160,6 +168,7 @@ Custom Zebar widget pack at `/mnt/c/Users/jtroeth/.glzr/zebar/custom-bar/`.
 
 - GlazeWM config: `C:\Users\jtroeth\.glzr\glazewm\config.yaml`
 - GlazeWM deploy script: `C:\Users\jtroeth\.glzr\glazewm\deploy-glazewm.ps1` (run elevated; the supported deploy path)
+- GlazeWM restart script: `C:\Users\jtroeth\.glzr\glazewm\restart-glazewm.ps1` — **the supported way to restart.** Graceful IPC shutdown (`command wm-exit`) then `schtasks /run /tn StartGlazeZsolt`, and it asserts the new process is elevated. Needs no UAC. `-Force` force-kills instead of IPC (fails against an elevated instance from a non-elevated shell); `-NoPause` for unattended use. Note: workspace assignment is *not* persisted across a restart — windows are re-adopted onto each monitor's displayed workspace, so terminals parked on separate workspaces consolidate onto one.
 - GlazeWM launcher: `C:\Users\jtroeth\.glzr\glazewm\start-glazewm.ps1` (not used by the scheduled task)
 - GlazeWM staging: `C:\Users\jtroeth\.glzr\glazewm\glazewm-new.exe` (consumed on next launch)
 - GlazeWM binary: `C:\Program Files\glzr.io\GlazeWM\glazewm-jt.exe`
@@ -176,8 +185,13 @@ Custom Zebar widget pack at `/mnt/c/Users/jtroeth/.glzr/zebar/custom-bar/`.
 
 ## Known Issues & Gotchas
 
-- **Elevation required**: GlazeWM must run elevated to reposition windows. Non-elevated → "Access is denied" on every `SetWindowPos`. Task Scheduler runs it elevated in production.
-- **Window styles**: Some apps (WSLg RAIL windows, Alacritty helper windows) have `WS_EX_TOOLWINDOW`/`WS_EX_NOACTIVATE` and are correctly skipped by `check_is_manageable`. Diagnostic logging shows skip reasons.
+- **UIPI: "managed but never moves" ≠ "not managed"**. Windows' User Interface Privilege Isolation blocks `SetWindowPos`/`SetWindowLongPtr` from a *lower*-integrity process onto a *higher*-integrity window, returning `Access is denied. (0x80070005)`. A non-elevated GlazeWM still **adopts** elevated windows into the tree (`query windows` lists them, the startup audit reconciles) but can never position them, so they sit wherever they were — untiled, unresponsive to move keybindings, and with whatever frame state a previous run left them in. It looks *exactly* like `check_is_manageable` rejected them, and the startup audit cannot show it because the windows are present and managed.
+  - Diagnosis: compare GlazeWM's desired rect (`query windows`) against the real `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`. A persistent mismatch plus a fixed number of `Failed to set window position` warnings *per sync tick* (GlazeWM retries forever because the window never reaches the target) is the signature. Confirm by comparing token integrity levels of GlazeWM and the stuck window's process.
+  - **Cause: integrity level is inherited from whoever spawned the window.** The keybinding `shell-exec C:\Program Files\Alacritty\alacritty.exe` makes terminals *children of GlazeWM*, so they run at GlazeWM's IL. An elevated GlazeWM (task) spawns **High IL** terminals; a hand-launched one spawns **Medium**. Each is self-consistent — the breakage is purely a **mismatch**: windows spawned by an elevated instance, then a hand-launched Medium instance restarted over the top. This is why "close it and reopen it" appears to fix it: the replacement inherits the *current* instance's IL.
+  - Fix: restart via `schtasks /run /tn StartGlazeZsolt` so the IL matches what spawned the windows. Nothing needs closing — the elevated instance re-adopts and immediately tiles them. **Invariant: always restart GlazeWM at the same integrity level as the instance that spawned the running windows.**
+  - Windows above High IL are unreachable either way: `PanGPA` (Palo Alto GlobalProtect) fails `SetWindowPos` even from an elevated GlazeWM. A couple of persistent denials naming no window are expected and benign.
+  - `platform_sync` logs these failures **without the window handle**, so the warning alone can't tell you which window is stuck.
+- **Window styles**: Some apps (WSLg RAIL windows, Alacritty helper windows) have `WS_EX_TOOLWINDOW`/`WS_EX_NOACTIVATE` and are correctly skipped by `check_is_manageable`. Alacritty's are winit dummy message windows — one per process, `16x16` at `(0,0)`, visible, no caption — so seeing them in the "NOT managed" audit is normal and never the cause of a missing terminal. Diagnostic logging shows skip reasons.
 - **`ColumnGrid::render` focus corruption**: `move_container_within_tree` and `wrap_in_split_container` silently shift the focus chain during tree rebuilds. `grid.rs` saves/restores focused window ID across Phase 3 to fix this.
 - **Config reload**: `default_columns` are re-resolved on every reapply (`effective_columns`), so moving a workspace to a different-aspect-ratio monitor picks up that monitor's rule.
 - **Cloaking is not hiding**: `show()`/`SW_SHOWNA` cannot reveal a window cloaked via `IApplicationView::set_cloak` — only `set_cloaked(false)` can. Any new shutdown path must uncloak, or it orphans windows (see Cloak Recovery above).

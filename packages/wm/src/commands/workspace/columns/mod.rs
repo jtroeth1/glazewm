@@ -25,7 +25,7 @@ use crate::{
     window::move_to_workspace_in_direction,
   },
   models::{Container, TilingWindow, WindowContainer, Workspace},
-  traits::{CommonGetters, PositionGetters},
+  traits::{CommonGetters, PositionGetters, TilingSizeGetters},
   user_config::UserConfig,
   wm_state::WmState,
 };
@@ -746,12 +746,10 @@ pub fn move_window_in_columns(
 /// grid, returning whether the focus was handled here.
 ///
 /// `Up`/`Down` moves to the window above/below in the same column.
-/// `Left`/`Right` moves to the most recently focused window in the
-/// adjacent column, so navigating away from a column and back returns
-/// to the window you left. Falls back to nearest-row when the column
-/// has no focus history (e.g. after a fresh layout render). At a
-/// column edge, returns `false` so the caller can fall through to
-/// cross-monitor focus.
+/// `Left`/`Right` moves straight across in `Grid` mode, and to the
+/// adjacent column's most recently focused window in the master-stack
+/// modes (see [`neighbour_in_column`]). At a column edge, returns
+/// `false` so the caller can fall through to cross-monitor focus.
 pub fn focus_in_columns(
   window: &WindowContainer,
   direction: &Direction,
@@ -776,18 +774,22 @@ pub fn focus_in_columns(
   };
 
   let target_id = match direction {
-    Direction::Up if row > 0 => grid.columns[col][row - 1].id(),
+    Direction::Up if row > 0 => Some(grid.columns[col][row - 1].id()),
     Direction::Down if row + 1 < grid.columns[col].len() => {
-      grid.columns[col][row + 1].id()
+      Some(grid.columns[col][row + 1].id())
     }
     Direction::Left if col > 0 => {
-      last_focused_in_column(&grid, col - 1, row)
+      neighbour_in_column(&grid, &workspace, (col, row), col - 1)
     }
     Direction::Right if col + 1 < grid.columns.len() => {
-      last_focused_in_column(&grid, col + 1, row)
+      neighbour_in_column(&grid, &workspace, (col, row), col + 1)
     }
     // Edge of grid — let caller handle cross-monitor focus.
     _ => return Ok(false),
+  };
+
+  let Some(target_id) = target_id else {
+    return Ok(false);
   };
 
   focus_container_by_id(&target_id, state)?;
@@ -796,40 +798,117 @@ pub fn focus_in_columns(
   Ok(true)
 }
 
-/// Returns the window to focus in `target_col` when navigating
-/// left/right from `source_row`.
+/// Returns the window to focus in `target_col` when navigating left or
+/// right out of row `source_row` of `source_col`.
 ///
-/// Multi-window columns are wrapped in a `SplitContainer` whose
-/// `child_focus_order` tracks the most recently focused child. When
-/// that history exists and points to a window still in the column, the
-/// remembered window wins. Otherwise falls back to the nearest row
-/// (clamped to the column height), matching the default spatial
-/// behaviour.
-fn last_focused_in_column(
+/// In `Grid` mode every column is a stack, so the neighbour is the one
+/// straight across — [`straight_across`]. Remembering the column's last
+/// focused window there means most sideways moves land on a different
+/// row than the one you left, which reads as a diagonal jump whose
+/// destination depends on where you last were in that column.
+///
+/// The master-stack modes keep the focus memory: the only ambiguous
+/// move is out of the single-window `C` column into a stack, and
+/// returning to the window you left is more useful there than landing
+/// on whichever row happens to sit level with the full-height center.
+///
+/// `None` only when the target column is empty, which `ColumnGrid::read`
+/// never produces.
+fn neighbour_in_column(
   grid: &ColumnGrid,
+  workspace: &Workspace,
+  (source_col, source_row): (usize, usize),
   target_col: usize,
-  source_row: usize,
-) -> Uuid {
-  let col_windows = &grid.columns[target_col];
+) -> Option<Uuid> {
+  let target = &grid.columns[target_col];
 
   // Single-window column — no choice to make.
-  if col_windows.len() == 1 {
-    return col_windows[0].id();
+  if target.len() == 1 {
+    return Some(target[0].id());
   }
 
-  // Multi-window column: check the parent split's focus history.
-  if let Some(parent) = col_windows[0].parent() {
-    if let Some(focused) = parent.child_focus_order().next() {
-      // Confirm the child is actually in this column (defensive).
-      if col_windows.iter().any(|w| w.id() == focused.id()) {
-        return focused.id();
-      }
+  if workspace.columns_mode() != ColumnsMode::Grid {
+    // Multi-window columns are wrapped in a `SplitContainer` whose
+    // `child_focus_order` tracks the most recently focused child. Use it
+    // when it points at a window still in the column.
+    let remembered = target
+      .first()
+      .and_then(CommonGetters::parent)
+      .and_then(|parent| parent.child_focus_order().next())
+      .filter(|focused| {
+        target.iter().any(|window| window.id() == focused.id())
+      });
+
+    if let Some(remembered) = remembered {
+      return Some(remembered.id());
     }
   }
 
-  // No focus history — fall back to nearest row.
-  let target_row = source_row.min(col_windows.len().saturating_sub(1));
-  col_windows[target_row].id()
+  straight_across(&grid.columns[source_col], source_row, target)
+}
+
+/// Returns the window in `target` level with row `source_row` of
+/// `source`: the one whose vertical span overlaps the source window's
+/// the most, ties going to the topmost.
+///
+/// Matching by row index instead would drift whenever the two columns
+/// hold different numbers of windows, which grid mode produces for any
+/// odd window count: row 1 of a two-row column covers the bottom half,
+/// which is row 2 of a three-row column, not row 1.
+fn straight_across(
+  source: &[TilingWindow],
+  source_row: usize,
+  target: &[TilingWindow],
+) -> Option<Uuid> {
+  let source_span = row_spans(source)
+    .get(source_row)
+    .copied()
+    .unwrap_or((0.0, 1.0));
+
+  let mut best: Option<(usize, f32)> = None;
+  for (index, span) in row_spans(target).into_iter().enumerate() {
+    let overlap =
+      (source_span.1.min(span.1) - source_span.0.max(span.0)).max(0.0);
+
+    if best.is_none_or(|(_, best_overlap)| overlap > best_overlap) {
+      best = Some((index, overlap));
+    }
+  }
+
+  best
+    .and_then(|(index, _)| target.get(index))
+    .map(CommonGetters::id)
+}
+
+/// Vertical span of every window in a column, as start/end fractions of
+/// the column's height.
+///
+/// Taken from the windows' tiling sizes rather than assuming even rows,
+/// so a column whose rows have been resized still matches by geometry.
+fn row_spans(column: &[TilingWindow]) -> Vec<(f32, f32)> {
+  // A single-window column is not wrapped in a vertical split, so its
+  // `tiling_size` is the column's width fraction, not a row height. The
+  // window spans the full height.
+  if column.len() < 2 {
+    return column.iter().map(|_| (0.0, 1.0)).collect();
+  }
+
+  let total = column
+    .iter()
+    .map(TilingSizeGetters::tiling_size)
+    .sum::<f32>()
+    .max(f32::EPSILON);
+
+  let mut start = 0.0;
+  column
+    .iter()
+    .map(|window| {
+      let end = start + window.tiling_size() / total;
+      let span = (start, end);
+      start = end;
+      span
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -1566,6 +1645,43 @@ general:
     // window in the stack), NOT ids[0]/row 0.
     assert!(
       focus_in_columns(&w0, &Direction::Right, &mut state, &config)
+        .unwrap()
+    );
+    assert_eq!(focused_window_id(&workspace), Some(ids[3]));
+  }
+
+  #[test]
+  fn grid_focus_goes_straight_across() {
+    let (mut state, workspace, windows) = setup(5);
+    let ids = windows.iter().map(CommonGetters::id).collect::<Vec<_>>();
+    let config = config_with_default_columns("C,*");
+
+    workspace.set_columns_mode(ColumnsMode::Grid);
+    reapply_assigned_columns(&workspace, &mut state, &config).unwrap();
+
+    // Round-robin into two columns of unequal height: the left column's
+    // three rows do not line up with the right column's two.
+    assert_eq!(
+      id_grid(&workspace),
+      vec![vec![ids[0], ids[2], ids[4]], vec![ids[1], ids[3]]]
+    );
+
+    // Leave the left column's focus history pointing at its top row.
+    focus_container_by_id(&ids[0], &mut state).unwrap();
+
+    // Left out of the right column's bottom row lands on the window
+    // level with it — the left column's bottom row, not the remembered
+    // ids[0].
+    let w3 = WindowContainer::TilingWindow(windows[3].clone());
+    assert!(focus_in_columns(&w3, &Direction::Left, &mut state, &config)
+      .unwrap());
+    assert_eq!(focused_window_id(&workspace), Some(ids[4]));
+
+    // And back the other way, which is only symmetric because neither
+    // direction consults focus history.
+    let w4 = WindowContainer::TilingWindow(windows[4].clone());
+    assert!(
+      focus_in_columns(&w4, &Direction::Right, &mut state, &config)
         .unwrap()
     );
     assert_eq!(focused_window_id(&workspace), Some(ids[3]));
